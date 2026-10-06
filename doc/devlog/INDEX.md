@@ -6,3 +6,4 @@ devlog本文は `doc/devlog/YYYY-MM-DD_HHMMSS.md` に1サイクル1ファイル�
 ## 索引
 
 - 2026-10-06_073837 | サイクル0.1 | 流用調査 | dangou-card/gentei-jankenの部品表（約35項目）・流用方式・優劣・仕様書あいまい点16件・段取り案をdoc/analysis/reuse_investigation.mdにまとめた（実装なし、読み取りのみ）
+- 2026-10-06_170209 | サイクル0.2 | 基盤づくり | git init+remote・uv環境・gentei-jankenからAI呼び出し層15ファイル約2,400行をコピー（DevRelay宛先cuidは既定値廃止し環境変数必須化）、テスト41件全PASS、1コミットでmainへpush
