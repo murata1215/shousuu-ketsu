@@ -7,9 +7,14 @@
 GameEvent は gentei-janken `engine/models.py` の同名クラスと同一構造
 （A分類：逐語コピー。engine/events.py が本クラスに依存するため）。
 PlayerState・Action群・各種結果モデルは少数決固有の新規実装（C分類）。
-契約（Obligation/Contract/contract_seq）はサイクル1.1で追加する。本サイクルの
-Settlement は契約フックを空リストで返すだけで、関連モデルは一切持たない
-（CLAUDE.md 過去の落とし穴③: 見た目だけ先行させる孤児コードを避けるため）。
+
+契約関連（Obligation/Contract/ObligationType/ConditionType/ContractProposeAction/
+ContractSignAction）は dangou-card `engine/models.py` の同名クラスをB分類で
+流用・縮小した（サイクル1.1）。型Bのdetailsをカード/市場指定からYES/NO指定に、
+型Cのconditionをmarket系からminority_side/in_minorityの2種に差し替え、
+is_fulfilled/is_expired（脱落失効用の状態）とContractCancelAction・発行料は
+持ち込まない（本作に脱落・取り消し・発行料はない、§6.1）。
+contract_seq は dangouに存在しない新設フィールド。
 """
 
 from enum import Enum
@@ -123,10 +128,138 @@ class VoteCommitAction(BaseModel):
     vote: Vote
 
 
+class ContractProposeAction(BaseModel):
+    """
+    契約提案アクション（§6.1/§9.2/§9.3）
+
+    terms は義務定義の辞書リスト。各要素は
+    {"obligor": str, "counterparty": str, "ob_type": str, "round_num": int,
+     "details": dict} の形（検証は engine/actions.py が行う）。
+    発行料はない（§6.1）。取り消しアクションは存在しない（§6.1・§11.1 #8）。
+    """
+
+    type: Literal["contract_propose"] = "contract_propose"
+    player_id: str
+    with_players: list[str] = Field(alias="with")
+    terms: list[dict[str, Any]]
+
+    model_config = {"populate_by_name": True}
+
+
+class ContractSignAction(BaseModel):
+    """契約署名アクション（§6.1/§9.2）"""
+
+    type: Literal["contract_sign"] = "contract_sign"
+    player_id: str
+    contract_id: str
+
+
 Action = Annotated[
-    DmAction | BroadcastAction | TransferAction | RepayAction | PassAction | VoteCommitAction,
+    DmAction | BroadcastAction | TransferAction | RepayAction | PassAction
+    | VoteCommitAction | ContractProposeAction | ContractSignAction,
     Field(discriminator="type"),
 ]
+
+
+# =============================================================================
+# 契約（§6）
+# =============================================================================
+
+class ObligationType(str, Enum):
+    """義務の種別（§6.2）"""
+
+    TYPE_A_PAYMENT = "type_a_payment"
+    """型A: 指定ラウンドに指定額を相手方へ支払う"""
+
+    TYPE_B_VOTE = "type_b_vote"
+    """型B: 指定ラウンドにYES（またはNO）へ投票する"""
+
+    TYPE_C_CONDITIONAL = "type_c_conditional"
+    """型C: 条件が成立したときだけ指定額を相手方へ支払う"""
+
+
+class ConditionType(str, Enum):
+    """型Cの条件種別（§6.4）"""
+
+    MINORITY_SIDE = "minority_side"
+    """指定ラウンドの少数派がYES（またはNO）になる"""
+
+    IN_MINORITY = "in_minority"
+    """指定ラウンドで特定のプレイヤーが少数派に入る"""
+
+
+class Obligation(BaseModel):
+    """
+    1つの義務単位（§6.1）
+
+    義務は「義務者」と「相手方」の組で管理する。is_fulfilled/is_expired の
+    ような状態は持たない。各義務は round_num のラウンドのSettlementで1度だけ
+    判定され、払われなかった分はそのまま消える（次ラウンド以降に請求されない。
+    §7.1手順6）ため、状態フラグを持つ必要がない（CLAUDE.md 過去の落とし穴③:
+    使わない状態を持ち越して孤児化させない）。
+
+    details の形（§9.3）:
+    - 型A: {"amount": int}
+    - 型B: {"vote": "YES"|"NO"}
+    - 型C: {"amount": int, "condition_type": str, "condition": dict}
+      condition_type="minority_side" は condition={"side": "YES"|"NO"}、
+      condition_type="in_minority" は condition={"target_player": str}
+      （対象は契約の当事者でなくてよい、§6.4）
+    """
+
+    obligation_id: str
+    contract_id: str
+    obligor: str
+    counterparty: str
+    ob_type: ObligationType
+    round_num: int
+    details: dict[str, Any]
+
+
+class ContractStatus(str, Enum):
+    """契約のステータス（§6.1）"""
+
+    PROPOSED = "proposed"
+    """提案中（署名待ち）"""
+
+    ACTIVE = "active"
+    """全当事者の署名がそろい成立"""
+
+    EXPIRED = "expired"
+    """提案したラウンドの終わりまでに署名がそろわず失効"""
+
+
+class Contract(BaseModel):
+    """
+    契約（§6.1）
+
+    2人以上の署名で成立する。契約の存在・当事者名・成立順は公示し、
+    内容（義務の詳細）は当事者だけが見られる（§8）。発行料はなく、
+    成立した契約は取り消せない（§6.1・§11.1 #8。取り消しアクションは
+    Action unionに存在しない）。
+    """
+
+    contract_id: str
+    """契約ID（試合のシードから導出した乱数で生成。推測不能な短い文字列、§8）"""
+
+    proposer: str
+    parties: list[str]
+    signed_by: list[str] = Field(default_factory=list)
+    obligations: list[Obligation] = Field(default_factory=list)
+    round_created: int
+    """提案したラウンド"""
+
+    status: ContractStatus = ContractStatus.PROPOSED
+
+    contract_seq: int | None = None
+    """
+    成立した順に振られる通し番号（提案順ではない。§6.1）。
+    全当事者の署名がそろった時点で確定し、以後変わらない。
+    未成立（PROPOSED/EXPIRED）はNone。公示されるのはこの番号だけ（§8）。
+    """
+
+    round_established: int | None = None
+    """成立したラウンド（未成立ならNone）"""
 
 
 # =============================================================================
@@ -182,6 +315,49 @@ class RoundSummary(BaseModel):
 
     public_ranks: dict[str, int] | None = None
     """R3・R6・R9終了後のみ設定される全員の順位（名前と順位のみ、§7.3）"""
+
+    established_contract_seqs: list[int] = Field(default_factory=list)
+    """このラウンドのNegotiationで成立したcontract_seq（§6.1/§8: 成立順の公示）"""
+
+    type_b_violator_ids: list[str] = Field(default_factory=list)
+    """型Bの義務に違反した者のプレイヤーID（§6.3/§8: 名前だけ公示）"""
+
+    payment_shortfall_ids: list[str] = Field(default_factory=list)
+    """契約の支払いを払いきれなかった者のプレイヤーID（§7.1手順8/§8: 金額・相手は非公開）"""
+
+
+class ObligationPayment(BaseModel):
+    """1つの義務に対する支払いの内訳（§7.1手順6、内部処理・ログ用）"""
+
+    contract_id: str
+    contract_seq: int
+    ob_index: int
+    """契約内での義務の記載順（0始まり）。違約金は破った型B義務の記載位置（§11.4 #12）"""
+
+    obligor: str
+    counterparty: str
+    ob_type: ObligationType
+    promised: int
+    """約束額（型Bの違約金は100万固定）"""
+
+    paid: int
+    """実際に支払われた額（0以上、promised以下）"""
+
+
+class ContractSettlementReport(BaseModel):
+    """Settlementの契約処理（手順3〜8）の結果（内部処理・ログ用）"""
+
+    violations: list[tuple[str, str]] = Field(default_factory=list)
+    """型Bの違反 (obligor, obligation_id) のリスト（手順3）"""
+
+    payable_limits: dict[str, int] = Field(default_factory=dict)
+    """義務者ごとの支払える上限（手順5）"""
+
+    payments: list[ObligationPayment] = Field(default_factory=list)
+    """実際に決定した支払いのリスト（手順6、contract_seq→記載順で整列済み）"""
+
+    shortfall_ids: list[str] = Field(default_factory=list)
+    """払いきれなかった者のプレイヤーID（手順8）"""
 
 
 class GameResult(BaseModel):

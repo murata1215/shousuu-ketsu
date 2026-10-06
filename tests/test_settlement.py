@@ -1,14 +1,16 @@
 """
 Settlementフェイズのテスト（§7.1）
 
-本サイクルは契約（§6）が無いため、手順3・4・6のフックが常に空であることと、
-手順の並び・現金が負にならないことを確認する。
+手順3（型Bの監査）・4（型Cの条件判定）・6（支払額の決定）はサイクル1.1で
+実装した。契約を使った詳細な確認（§12.3受け入れテスト等）は
+tests/test_settlement_contracts.py で行い、ここでは手順の並び・契約なしの
+基本挙動・現金が負にならないことを確認する。
 """
 
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.models import PlayerState, Vote
-from engine.settlement import execute_settlement, _audit_type_b, _evaluate_type_c, _plan_contract_payments
+from engine.settlement import execute_settlement
 
 
 def _players(n: int = 12) -> dict[str, PlayerState]:
@@ -25,14 +27,17 @@ def _votes_7_5() -> dict[str, Vote]:
     return {**{pid: Vote.YES for pid in ids[:7]}, **{pid: Vote.NO for pid in ids[7:]}}
 
 
-def test_contract_hooks_return_empty_in_cycle_1_0() -> None:
-    """手順3・4・6は契約が無いため常に空リストを返す（1.1で差し込む前提）"""
+def test_no_contracts_means_no_payments_or_violations() -> None:
+    """契約が無い場合、手順3・4・6は何も生み出さない（1.0の挙動を維持）"""
     players = _players()
-    assert _audit_type_b(players, round_num=1) == []
-    from engine.minority import resolve_minority
-    outcome = resolve_minority(_votes_7_5(), GameConfig.default_12(), 0, 1, is_final_round=False)
-    assert _evaluate_type_c(players, outcome, round_num=1) == []
-    assert _plan_contract_payments(players, {}, [], [], round_num=1) == []
+    logger = EventLogger()
+    result = execute_settlement(
+        players, _votes_7_5(), GameConfig.default_12(), carryover_before=0,
+        round_num=1, logger=logger, is_final_round=False, contracts=None,
+    )
+    assert result.report.violations == []
+    assert result.report.payments == []
+    assert result.report.shortfall_ids == []
 
 
 def test_settlement_pays_minority_and_cash_never_negative() -> None:
@@ -44,9 +49,10 @@ def test_settlement_pays_minority_and_cash_never_negative() -> None:
         players[pid] = players[pid].model_copy(update={"cash": players[pid].cash - config.entry_fee})
 
     logger = EventLogger()
-    updated, outcome = execute_settlement(
+    result = execute_settlement(
         players, _votes_7_5(), config, carryover_before=0, round_num=1, logger=logger, is_final_round=False,
     )
+    updated, outcome = result.players, result.outcome
 
     assert outcome.minority_side == Vote.NO
     for p in updated.values():

@@ -7,9 +7,12 @@
 gentei-janken `engine/rng.py`（B分類）から流用。`shuffle_action_order` を
 `shuffle_turn_order` に改名し（§7.1 Negotiationの手番順の意味を明確化）、
 自動代行（§4.4）の無作為選択用に `random_vote()` を追加した。
+サイクル1.1で `random_contract_id()` を追加（§6.1/§8: 未成立の契約IDは
+連番にせず、乱数で生成することで提案件数を他者から推測不能にする）。
 """
 
 import random
+import string
 
 from engine.models import Vote
 
@@ -32,6 +35,7 @@ class GameRng:
         self._negotiation_rng = random.Random(self._master.randint(0, 2**63))
         self._autocommit_rng = random.Random(self._master.randint(0, 2**63))
         self._general_rng = random.Random(self._master.randint(0, 2**63))
+        self._contract_id_rng = random.Random(self._master.randint(0, 2**63))
 
     def shuffle_turn_order(self, player_ids: list[str]) -> list[str]:
         """
@@ -56,3 +60,23 @@ class GameRng:
         同一seedなら同じ結果が再現される。
         """
         return self._autocommit_rng.choice([Vote.YES, Vote.NO])
+
+    def random_contract_id(self, existing_ids: set[str]) -> str:
+        """
+        契約IDを無作為に生成する（§6.1/§8）
+
+        連番にすると、未成立（PROPOSED）の提案件数が番号から他者に推測できて
+        しまう（未成立の提案は非公開、§8）ため、英数字8桁の乱数文字列にする。
+        同一seedなら同じIDが再現される。既存IDと衝突したら引き直す。
+
+        Args:
+            existing_ids: これまでに発行済みの契約ID集合（衝突判定用）
+
+        Returns:
+            "C_" + 英数字8桁の契約ID（他の既存IDと重複しない）
+        """
+        alphabet = string.ascii_uppercase + string.digits
+        while True:
+            candidate = "C_" + "".join(self._contract_id_rng.choices(alphabet, k=8))
+            if candidate not in existing_ids:
+                return candidate

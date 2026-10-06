@@ -3,8 +3,10 @@
 
 dangou-card `engine/game.py`（B分類）の5フェイズ構成（Open → Negotiation →
 Commit → Settlement → Finance）を踏襲しつつ、脱落・市場・カード・報奨・
-匿名通信・倍掛け・反省フェイズを全て削除した。契約（§6）は未実装で、
-Settlement の契約フックは常に空（engine/settlement.py参照）。
+匿名通信・倍掛け・反省フェイズを全て削除した。契約（§6）はサイクル1.1で
+実装した（提案→署名の処理・提案ラウンド末の失効・成立番号の付番は
+dangou-card `engine/game.py` のcontract_propose/contract_signブロック（B分類）
+を少数決向けに縮小・流用）。
 
 投票の収集は「全員から集めてから結果を公開する」（§4.1: 締切後に変更不可、
 §7.1手順1でReveal）設計にしているため、1人のCommitが他人に見える経路は
@@ -19,13 +21,15 @@ from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.finance import execute_finance
 from engine.models import (
-    Action, BroadcastAction, DmAction, GameResult, PassAction, PlayerState,
+    Action, BroadcastAction, Contract, ContractProposeAction, ContractSignAction,
+    ContractStatus, DmAction, GameResult, PassAction, PlayerState,
     RepayAction, RoundSummary, TransferAction, Vote, VoteCommitAction,
 )
 from engine.negotiation import PlayerAgent
 from engine.rng import GameRng
 from engine.settlement import execute_settlement
 from engine import actions as action_ops
+from engine import contracts as contract_ops
 from engine import player as player_ops
 
 
@@ -78,8 +82,15 @@ class Game:
         self.total_destroyed_carryover: int = 0
         self.total_forfeited_remainder: int = 0
 
+        self.contracts: list[Contract] = []
+        """全契約（PROPOSED/ACTIVE/EXPIRED、§6.1）。取り消しは無いので要素は減らない"""
+
+        self._next_contract_seq: int = 1
+        """次に成立する契約へ振る通し番号（§6.1: 提案順ではなく成立順）"""
+
         self._current_auto_pids: set[str] = set()
         self._round_messages: list[dict[str, Any]] = []
+        self._current_established_seqs: list[int] = []
         self._last_round_summary: RoundSummary | None = None
         self._public_ranks_history: dict[int, dict[str, int]] = {}
 
@@ -191,9 +202,14 @@ class Game:
         """
         最大10巡、毎巡ランダムな手番で1アクションを処理する（§7手順2）。
 
-        全員が続けてパスすればその巡で早期終了する。
+        全員が続けてパスすればその巡で早期終了する。巡が尽きた後（早期終了も
+        含む）、このラウンドで提案され署名がそろわなかった契約を失効させる
+        （§6.1: 対象ラウンドは署名した当ラウンドからR12まで＝署名前は
+        このラウンドのうちに成立しなければ提案自体が流れる。dangou-card
+        `engine/game.py`（B分類）の扱いを調べて合わせた、CLAUDE.md「守ること」）。
         """
         self._round_messages = []
+        self._current_established_seqs = []
         alive_ids = sorted(self.players.keys())
 
         for turn in range(1, self.config.negotiation_max_turns + 1):
@@ -213,7 +229,10 @@ class Game:
                     continue
 
                 all_passed = False
-                result = action_ops.validate_action(action, p, self.config, self.players)
+                result = action_ops.validate_action(
+                    action, p, self.config, self.players,
+                    round_num=round_num, contracts=self.contracts,
+                )
                 if not result.success:
                     self.logger.log("NEGOTIATION_ACTION", round_num, "negotiation", data={
                         "player_id": pid, "action": action.type,
@@ -228,6 +247,22 @@ class Game:
                     "turn": turn,
                 })
                 break
+
+        self._expire_unsigned_contracts(round_num)
+
+    def _expire_unsigned_contracts(self, round_num: int) -> None:
+        """
+        このラウンドで提案され署名がそろわなかった契約をEXPIREDにする（§6.1）
+        """
+        for i, c in enumerate(self.contracts):
+            if c.status == ContractStatus.PROPOSED and c.round_created == round_num:
+                self.contracts[i] = c.model_copy(update={"status": ContractStatus.EXPIRED})
+                self.logger.log("CONTRACT_EXPIRED", round_num, "negotiation", data={
+                    "contract_id": c.contract_id,
+                    "proposer": c.proposer,
+                    "parties": list(c.parties),
+                    "signed_by": list(c.signed_by),
+                })
 
     def _execute_negotiation_action(
         self, action: Action, pid: str, round_num: int, turn: int,
@@ -265,6 +300,44 @@ class Game:
                 "from_post": old_p.debt_post - new_p.debt_post,
                 "from_pre": old_p.debt_pre - new_p.debt_pre,
             })
+        elif isinstance(action, ContractProposeAction):
+            # 契約提案: 発行料なし（§6.1）。提案者は自動で署名済みになる
+            # （dangou-card現行の扱いに合わせる。engine/contracts.py::create_contract）。
+            parties = [pid] + list(action.with_players)
+            existing_ids = {c.contract_id for c in self.contracts}
+            contract_id = self.rng.random_contract_id(existing_ids)
+            contract = contract_ops.create_contract(
+                proposer=pid, parties=parties, terms=action.terms,
+                round_created=round_num, contract_id=contract_id,
+            )
+            self.contracts.append(contract)
+            self.logger.log("CONTRACT_PROPOSED", round_num, "negotiation", data={
+                "contract_id": contract.contract_id, "proposer": pid,
+                "parties": parties, "turn": turn,
+            })
+        elif isinstance(action, ContractSignAction):
+            # 契約署名（§6.1）。全当事者の署名がそろった瞬間にcontract_seqを
+            # 付番する（提案順ではなく成立順。後から変わらない）。
+            for i, c in enumerate(self.contracts):
+                if c.contract_id != action.contract_id:
+                    continue
+                signed, just_established = contract_ops.sign_contract(c, pid)
+                self.logger.log("CONTRACT_SIGNED", round_num, "negotiation", data={
+                    "contract_id": action.contract_id, "signer": pid, "turn": turn,
+                })
+                if just_established:
+                    seq = self._next_contract_seq
+                    self._next_contract_seq += 1
+                    signed = signed.model_copy(update={
+                        "contract_seq": seq, "round_established": round_num,
+                    })
+                    self._current_established_seqs.append(seq)
+                    self.logger.log("CONTRACT_ESTABLISHED", round_num, "negotiation", data={
+                        "contract_id": action.contract_id, "parties": list(signed.parties),
+                        "contract_seq": seq,
+                    })
+                self.contracts[i] = signed
+                break
 
     # ------------------------------------------------------------------
     # Phase 3: Commit（§7手順3/§4.1/§4.4）
@@ -297,7 +370,10 @@ class Game:
                     break
 
             if vote is None:
-                vote = decide_auto_vote(self.rng, type_b_constraint=None)
+                constraint = contract_ops.vote_constraint_for_round(
+                    self.contracts, pid, round_num,
+                )
+                vote = decide_auto_vote(self.rng, type_b_constraint=constraint)
                 auto_ids.append(pid)
                 self.logger.log("AUTO_COMMIT", round_num, "commit", data={
                     "player_id": pid, "vote": vote.value,
@@ -325,14 +401,17 @@ class Game:
     # ------------------------------------------------------------------
 
     def _phase_settlement(self, round_num: int, votes: dict[str, Vote], *, is_final: bool) -> None:
-        updated, outcome = execute_settlement(
+        result = execute_settlement(
             self.players, votes, self.config, self.carryover, round_num, self.logger,
-            is_final_round=is_final,
+            is_final_round=is_final, contracts=self.contracts,
         )
-        self.players = updated
+        self.players = result.players
+        outcome = result.outcome
         self.carryover = outcome.carryover_after
         self.total_destroyed_carryover += outcome.destroyed_carryover
         self.total_forfeited_remainder += outcome.forfeited_remainder
+
+        violator_ids = sorted({obligor for obligor, _ in result.report.violations})
 
         self._last_round_summary = RoundSummary(
             round_num=round_num,
@@ -340,6 +419,9 @@ class Game:
             auto_commit_ids=sorted(self._current_auto_pids),
             minority_outcome=outcome,
             interest_total=0,
+            established_contract_seqs=sorted(self._current_established_seqs),
+            type_b_violator_ids=violator_ids,
+            payment_shortfall_ids=list(result.report.shortfall_ids),
         )
 
     # ------------------------------------------------------------------
@@ -420,12 +502,29 @@ class Game:
         # ラウンド」を指すので round_num による絞り込みは不要）。
         last_round = self._last_round_summary
 
+        # 契約の存在・当事者名・成立順だけを公開する（§8。内容は当事者だけが見られる）。
+        # 未成立（PROPOSED/EXPIRED）はここに出さない——提案件数自体が非公開情報のため。
+        established = sorted(
+            (c for c in self.contracts if c.status == ContractStatus.ACTIVE),
+            key=lambda c: c.contract_seq,
+        )
+        contracts_public = [
+            {
+                "contract_id": c.contract_id,
+                "parties": list(c.parties),
+                "contract_seq": c.contract_seq,
+                "round_established": c.round_established,
+            }
+            for c in established
+        ]
+
         state: dict[str, Any] = {
             "round_num": round_num,
             "question": self.questions[round_num - 1],
             "carryover": self.carryover,
             "initial_loans": {pid: p.initial_loan for pid, p in sorted(self.players.items())},
             "public_ranks_history": dict(self._public_ranks_history),
+            "contracts_public": contracts_public,
             "last_round_result": None if last_round is None else {
                 "round_num": last_round.round_num,
                 "votes": {pid: v.value for pid, v in sorted(last_round.votes.items())},
@@ -437,12 +536,48 @@ class Game:
                 "payout_per_minority": last_round.minority_outcome.payout_per_minority,
                 "carryover_after": last_round.minority_outcome.carryover_after,
                 "auto_commit_ids": last_round.auto_commit_ids,
+                "established_contract_seqs": last_round.established_contract_seqs,
+                "type_b_violator_ids": last_round.type_b_violator_ids,
+                "payment_shortfall_ids": last_round.payment_shortfall_ids,
             },
         }
 
         if for_player_id is not None:
             me = self.players.get(for_player_id)
             state["messages"] = self._visible_messages(for_player_id)
+
+            # 当事者だけに見える契約内容（§8）。
+            # my_contracts: 成立済み（ACTIVE）で自分が当事者の契約の全義務。
+            # contracts_pending: 署名待ち（PROPOSED）で自分が当事者の提案。
+            # 相手側の画面にも contract_id と内容が必ず出る（§8）。
+            def _obligations_view(c: Contract) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "obligor": ob.obligor, "counterparty": ob.counterparty,
+                        "ob_type": ob.ob_type.value, "round_num": ob.round_num,
+                        "details": dict(ob.details),
+                    }
+                    for ob in c.obligations
+                ]
+
+            state["my_contracts"] = [
+                {
+                    "contract_id": c.contract_id, "contract_seq": c.contract_seq,
+                    "parties": list(c.parties), "obligations": _obligations_view(c),
+                }
+                for c in established
+                if for_player_id in c.parties
+            ]
+            state["contracts_pending"] = [
+                {
+                    "contract_id": c.contract_id, "proposer": c.proposer,
+                    "parties": list(c.parties), "signed_by": list(c.signed_by),
+                    "round_created": c.round_created, "obligations": _obligations_view(c),
+                }
+                for c in self.contracts
+                if c.status == ContractStatus.PROPOSED and for_player_id in c.parties
+            ]
+
             if me is not None:
                 interest_pre_forecast = -(
                     -me.debt_pre * self.config.interest_rate_pre_num // self.config.interest_rate_pre_den
@@ -451,6 +586,15 @@ class Game:
                     -me.debt_post * self.config.interest_rate_post_num // self.config.interest_rate_post_den
                 )
                 my_rank = player_ops.assets_ranking(self.players.values())[for_player_id]
+                # 今ラウンドが期限の自分の義務（型Aの額／型Bの指定／型Cの条件と額、§7.2）
+                obligations_due = [
+                    {
+                        "ob_type": ob.ob_type.value, "counterparty": ob.counterparty,
+                        "details": dict(ob.details),
+                    }
+                    for ob in contract_ops.obligations_due(self.contracts, round_num)
+                    if ob.obligor == for_player_id
+                ]
                 state["my_finance"] = {
                     "cash": me.cash,
                     "debt_pre": me.debt_pre,
@@ -458,6 +602,7 @@ class Game:
                     "total_debt": me.total_debt,
                     "remaining_credit": player_ops.remaining_credit(me, self.config),
                     "interest_forecast": interest_pre_forecast + interest_post_forecast,
+                    "obligations_due": obligations_due,
                 }
                 state["my_rank"] = {
                     "rank": my_rank.rank, "tied": my_rank.tied, "n_players": my_rank.n_players,
