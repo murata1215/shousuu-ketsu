@@ -1,0 +1,19 @@
+[project]
+name = "shousuu-ketsu"
+version = "0.1.0"
+description = "嘘八百万 —少数決— ルールエンジン"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic>=0.121.0",
+    "httpx>=0.28.1",
+    "openai>=2.53.0",
+    "pytest>=9.1.1",
+    "python-dotenv>=1.2.2",
+]
+
+[tool.uv]
+# アプリケーション本体（engine/llm/bots/viewer/scripts）はトップレベルパッケージとして
+# 直接importするだけで、配布用の src/ レイアウトは持たない（gentei-janken/dangou-cardに
+# 倣う。dangou-cardのsrc/dangou_card/は死にコードだった）。
+package = false

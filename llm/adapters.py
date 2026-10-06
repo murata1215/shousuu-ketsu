@@ -1,0 +1,472 @@
+"""
+LLM APIアダプタ
+
+各社APIへの接続を共通インターフェースで抽象化する。
+.envの読み取りはこのモジュール内に限定。
+キー・生レスポンス内のキー情報をログ・例外メッセージに絶対に出さない。
+
+修正3: プロンプトキャッシュ最適化（Anthropic cache_control）
+修正7: タイムアウト60秒 + 指数バックオフリトライ
+"""
+
+import os
+import time
+from typing import Any
+
+from llm.models import ModelInfo
+from llm.constants import API_TIMEOUT_SECONDS, API_MAX_RETRIES
+
+
+def _dump_usage_raw(usage_obj: Any) -> dict[str, Any] | None:
+    """
+    API応答の usage オブジェクトを辞書にダンプする（Gemini等の未知フィールド炙り出し用）。
+
+    pydantic v2 の model_dump() → pydantic v1 の dict() → vars() の順で試行。
+    取得失敗時は None を返す（試合を止めない）。
+    """
+    try:
+        if hasattr(usage_obj, "model_dump"):
+            return usage_obj.model_dump()
+        if hasattr(usage_obj, "dict"):
+            return usage_obj.dict()
+        return {k: v for k, v in vars(usage_obj).items() if not k.startswith("_")}
+    except Exception:
+        return None
+
+
+def _norm_response_model(value: Any) -> str | None:
+    """
+    API応答の response.model 相当を安全に正規化する。
+
+    取得不能・非文字列・空白のみの場合は None を返す
+    （requested model_id で埋めて「返却された」と偽装しない）。
+    """
+    try:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped if stripped else None
+    except Exception:
+        return None
+
+
+# Cycle 6.1: thinking を有効化すると temperature を 1 以外にできない provider。
+# Cycle 6 スモークの HTTP 400 本文で実測確認したものだけを列挙する。
+#   Anthropic: "temperature may only be set to 1 when thinking is enabled or in adaptive ..."
+#   Moonshot : "invalid temperature: only 1 is allowed for this model"
+# 本走(llm_agent.py)は request_options を渡さず、Moonshot既定のextra_paramsは
+# {"thinking": {"type": "disabled"}} のため、この分岐には入らない（本走は不変）。
+THINKING_TEMPERATURE_LOCKED_PROVIDERS = ("Anthropic", "Moonshot")
+THINKING_LOCKED_TEMPERATURE = 1.0
+
+
+def _thinking_enabled_payload(payload: dict[str, Any] | None) -> bool:
+    """リクエストに『思考を有効化する』指示が入っているかを判定する。
+
+    registry既定の {"thinking": {"type": "disabled"}} は False を返す。
+    request_options 由来の {"thinking": {"type": "adaptive"|"enabled"}} は True。
+    """
+    if not payload:
+        return False
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+    return thinking.get("type") != "disabled"
+
+
+class AdapterError(Exception):
+    """APIアダプタのエラー（キー情報を含まない安全なメッセージのみ）"""
+    pass
+
+
+def _should_retry(error: Exception) -> bool:
+    """リトライすべきエラーか判定する（429/5xx/接続エラー/タイムアウト）"""
+    error_str = str(error).lower()
+    error_type = type(error).__name__.lower()
+    # タイムアウト
+    if "timeout" in error_str or "timeout" in error_type:
+        return True
+    # レート制限 (429)
+    if "429" in error_str or "rate" in error_str:
+        return True
+    # サーバーエラー (5xx)
+    if any(f"{code}" in error_str for code in [500, 502, 503, 504]):
+        return True
+    # 接続エラー
+    if "connection" in error_str or "connect" in error_type:
+        return True
+    return False
+
+
+def _classify_error(error: Exception) -> str:
+    """エラー種別を分類する（ログ用）"""
+    error_str = str(error).lower()
+    if "timeout" in error_str:
+        return "timeout"
+    if "429" in error_str or "rate" in error_str:
+        return "rate_limit"
+    if any(f"{code}" in error_str for code in [500, 502, 503, 504]):
+        return "server_error"
+    if "connection" in error_str:
+        return "connection_error"
+    return "other"
+
+
+class AnthropicAdapter:
+    """
+    Anthropic API アダプタ
+
+    修正3: system部にcache_controlを付与
+    修正7: タイムアウト + リトライ
+    """
+
+    def __init__(
+        self,
+        model_info: ModelInfo,
+        max_retries: int | None = None,
+        allow_temperature_fallback: bool = True,
+    ) -> None:
+        self.model_info = model_info
+        self._client = None
+        # None は従来どおり adapter/SDK の既定 retry を使う。
+        # Phase 2 は 0 を渡し、クライアント側の再送を抑止する。
+        self._max_retries = max_retries
+        self._allow_temperature_fallback = allow_temperature_fallback
+
+    def _get_client(self) -> Any:
+        """遅延初期化でクライアントを取得（キーをログに出さない）"""
+        if self._client is None:
+            import anthropic
+            api_key = os.environ.get(self.model_info.env_key)
+            if not api_key:
+                raise AdapterError(
+                    f"Environment variable {self.model_info.env_key} is not set"
+                )
+            # モデル別タイムアウト設定。素の秒数（float）を渡す——
+            # httpx.Timeout(...) を渡すと、このSDK(anthropic 1.8.0)が内部で
+            # httpx2を使っているため「httpx.Timeout is from the httpx package,
+            # but this SDK uses httpx2」というTypeErrorになる（サイクル1.0の
+            # httpx/httpx2問題の残り半分。L1/M1/H1が1コールも発行できず
+            # サイクル2.3の疎通スモークで初めて表面化した実害）。
+            # OpenAI系アダプタ（本ファイル下部）も同じく素の数値を渡している。
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "timeout": self.model_info.timeout_seconds,
+            }
+            if self._max_retries is not None:
+                kwargs["max_retries"] = self._max_retries
+            self._client = anthropic.Anthropic(**kwargs)
+        return self._client
+
+    def complete(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        request_options: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        APIコールを実行する（リトライ付き）
+
+        Returns:
+            (レスポンステキスト, usage辞書)
+            usage辞書にはcache_read_input_tokensも含む
+        """
+        last_error = None
+        attempts = API_MAX_RETRIES if self._max_retries is None else self._max_retries
+        for attempt in range(attempts + 1):
+            try:
+                client = self._get_client()
+                # 修正3: system部にcache_controlを付与
+                # extended thinking対応: temperatureが使えないモデルもある
+                kwargs: dict[str, Any] = {
+                    "model": self.model_info.model_id,
+                    "system": [{
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                }
+                if request_options:
+                    kwargs.update(request_options)
+                # Cycle 6.1: thinking有効時、Anthropic/Moonshotはtemperature=1以外を拒否する。
+                thinking_locked = (
+                    _thinking_enabled_payload(kwargs)
+                    and self.model_info.provider in THINKING_TEMPERATURE_LOCKED_PROVIDERS
+                )
+                # Sonnet/Opusなどtemperatureを廃止したモデルは、ModelInfoで明示的に省略する。
+                # Haiku等の対応モデルには従来どおり呼出側の値を送る。
+                if self.model_info.supports_temperature:
+                    effective_temperature = (
+                        THINKING_LOCKED_TEMPERATURE
+                        if thinking_locked
+                        else self.model_info.temperature_override
+                        if self.model_info.temperature_override is not None
+                        else temperature
+                    )
+                    try:
+                        response = client.messages.create(temperature=effective_temperature, **kwargs)
+                    except Exception as temp_err:
+                        _temp_err_msg = str(temp_err).lower()
+                        # 2種類の「temperatureを拒否される」ケースを区別せず両方拾う:
+                        #   1. "deprecated": サーバ側がtemperatureを非推奨として拒否する場合（従来）
+                        #   2. "unexpected keyword argument": SDKのシグネチャから
+                        #      temperature自体が削除された場合（サイクル2.5で実測: anthropic
+                        #      1.8.0のMessages.create()はtemperature/top_pを持たず、
+                        #      ネットワークに出る前にTypeErrorになる。条件が"deprecated"
+                        #      だけだとこのケースを取りこぼし、supports_temperature=Trueの
+                        #      L1が1コールも発行できず全滅していた）
+                        if (
+                            self._allow_temperature_fallback
+                            and "temperature" in _temp_err_msg
+                            and (
+                                "deprecated" in _temp_err_msg
+                                or "unexpected keyword argument" in _temp_err_msg
+                            )
+                        ):
+                            response = client.messages.create(**kwargs)
+                        else:
+                            raise
+                else:
+                    response = client.messages.create(**kwargs)
+                # Sonnet 5等はThinkingBlockを返す場合がある。TextBlockのみ抽出
+                text = ""
+                for block in (response.content or []):
+                    if hasattr(block, "text"):
+                        text = block.text
+                        break
+                # thinking_tokens を捕捉（Sonnet 5 等の extended thinking 用）
+                # Anthropic SDK: output_tokens_details.thinking_tokens → 統一キー reasoning_tokens
+                _otd = getattr(response.usage, "output_tokens_details", None)
+                _input_t = response.usage.input_tokens
+                _output_t = response.usage.output_tokens
+                usage = {
+                    "input_tokens": _input_t,
+                    "output_tokens": _output_t,
+                    "total_tokens": _input_t + _output_t,  # Anthropic: thinking は output_tokens に含まれる
+                    "cache_creation_input_tokens": getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+                    "cache_read_input_tokens": getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+                    "reasoning_tokens": getattr(_otd, "thinking_tokens", 0) or 0,
+                    "finish_reason": getattr(response, "stop_reason", None),
+                    "usage_raw": _dump_usage_raw(response.usage),
+                    "requested_model": self.model_info.model_id,
+                    "response_model": _norm_response_model(getattr(response, "model", None)),
+                }
+                return text, usage
+
+            except Exception as e:
+                last_error = e
+                if attempt < attempts and _should_retry(e):
+                    # 指数バックオフ: 1秒, 2秒
+                    wait = 2 ** attempt
+                    time.sleep(wait)
+                    continue
+                break
+
+        # 全リトライ失敗
+        error_type = type(last_error).__name__ if last_error else "Unknown"
+        error_msg = str(last_error)[:200] if last_error else ""
+        raise AdapterError(
+            f"Anthropic API error ({error_type}): {error_msg}"
+        ) from None
+
+
+class OpenAICompatAdapter:
+    """
+    OpenAI互換API アダプタ
+
+    openai SDKのbase_url切替でDeepSeek/Kimi/Grok/OpenAIに対応。
+    修正7: タイムアウト + リトライ
+    """
+
+    def __init__(
+        self,
+        model_info: ModelInfo,
+        max_retries: int | None = None,
+        allow_temperature_fallback: bool = True,
+    ) -> None:
+        self.model_info = model_info
+        self._client = None
+        # None → 従来どおり（アダプタ内部: API_MAX_RETRIES / SDK: 既定リトライ）
+        # 0    → アダプタ内部リトライ・SDK内部リトライとも完全に無効化する
+        #        （matrixのstrict呼び出し用）
+        self._max_retries = max_retries
+        self._allow_temperature_fallback = allow_temperature_fallback
+
+    def _get_client(self) -> Any:
+        """遅延初期化でクライアントを取得"""
+        if self._client is None:
+            import openai
+            api_key = os.environ.get(self.model_info.env_key)
+            if not api_key:
+                raise AdapterError(
+                    f"Environment variable {self.model_info.env_key} is not set"
+                )
+            kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "timeout": self.model_info.timeout_seconds,  # モデル別タイムアウト
+            }
+            if self.model_info.base_url:
+                kwargs["base_url"] = self.model_info.base_url
+            if self._max_retries is not None:
+                kwargs["max_retries"] = self._max_retries  # OpenAI SDK内部リトライを明示的に上書き
+            self._client = openai.OpenAI(**kwargs)
+        return self._client
+
+    def complete(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        max_tokens: int = 1000,
+        temperature: float = 0.7,
+        request_options: dict[str, Any] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """APIコールを実行する（リトライ付き）"""
+        last_error = None
+        attempts = API_MAX_RETRIES if self._max_retries is None else self._max_retries
+        for attempt in range(attempts + 1):
+            try:
+                client = self._get_client()
+                full_messages = [{"role": "system", "content": system}] + messages
+                create_kwargs: dict[str, Any] = {
+                    "model": self.model_info.model_id,
+                    "messages": full_messages,
+                    self.model_info.max_tokens_param: max_tokens,
+                }
+                # per-model API固有パラメータ (例: thinking制御)
+                # openai SDKは未知のkwargsを拒否するため extra_body で送信
+                if self.model_info.extra_params:
+                    create_kwargs["extra_body"] = self.model_info.extra_params
+                if request_options:
+                    create_kwargs.update(request_options)
+                # Cycle 6.1: thinking有効時、Anthropic/Moonshotはtemperature=1以外を拒否する。
+                thinking_locked = (
+                    _thinking_enabled_payload(create_kwargs.get("extra_body"))
+                    and self.model_info.provider in THINKING_TEMPERATURE_LOCKED_PROVIDERS
+                )
+                if self.model_info.supports_temperature:
+                    create_kwargs["temperature"] = (
+                        THINKING_LOCKED_TEMPERATURE
+                        if thinking_locked
+                        else self.model_info.temperature_override
+                        if self.model_info.temperature_override is not None
+                        else temperature
+                    )
+                # temperatureフォールバック: 一部モデル(Kimi k2.6等)は特定値のみ許可。
+                # supports_temperature=False のモデルは元から temperature を送っていない
+                # ためこのフォールバック経路には入らない（到達不能）。
+                try:
+                    response = client.chat.completions.create(**create_kwargs)
+                except Exception as temp_err:
+                    if (
+                        self._allow_temperature_fallback
+                        and self.model_info.supports_temperature
+                        and "temperature" in str(temp_err).lower()
+                    ):
+                        # temperature制限のあるモデル: temperature省略で再試行
+                        create_kwargs.pop("temperature", None)
+                        response = client.chat.completions.create(**create_kwargs)
+                    else:
+                        raise
+                text = response.choices[0].message.content or "" if response.choices else ""
+                # reasoning系モデル対応: contentが空でreasoning_contentに本文がある場合
+                if not text and response.choices:
+                    extras = getattr(response.choices[0].message, 'model_extra', None) or {}
+                    text = extras.get('reasoning_content', '') or ''
+                # finish_reason キャプチャ（length=max_tokens切断の検知用）
+                finish_reason = response.choices[0].finish_reason if response.choices else None
+                # reasoning_tokens / cached_tokens を防御的に取得
+                # OpenAI SDK: completion_tokens_details.reasoning_tokens,
+                #             prompt_tokens_details.cached_tokens / cache_write_tokens
+                _ctd = getattr(response.usage, "completion_tokens_details", None)
+                _ptd = getattr(response.usage, "prompt_tokens_details", None)
+                usage = {
+                    "input_tokens": getattr(response.usage, "prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(response.usage, "completion_tokens", 0) or 0,
+                    "total_tokens": getattr(response.usage, "total_tokens", 0) or 0,  # Gemini: thinking が completion に含まれない場合 total > input+output
+                    "cache_read_input_tokens": getattr(_ptd, "cached_tokens", 0) or 0,
+                    "cache_creation_input_tokens": getattr(_ptd, "cache_write_tokens", 0) or 0,
+                    "reasoning_tokens": getattr(_ctd, "reasoning_tokens", 0) or 0,
+                    "finish_reason": finish_reason,
+                    "usage_raw": _dump_usage_raw(response.usage),
+                    "requested_model": self.model_info.model_id,
+                    "response_model": _norm_response_model(getattr(response, "model", None)),
+                }
+                return text, usage
+
+            except Exception as e:
+                last_error = e
+                if attempt < attempts and _should_retry(e):
+                    wait = 2 ** attempt
+                    time.sleep(wait)
+                    continue
+                break
+
+        error_type = type(last_error).__name__ if last_error else "Unknown"
+        error_msg = str(last_error)[:200] if last_error else ""
+        raise AdapterError(
+            f"OpenAI-compat API error ({error_type}): {error_msg}"
+        ) from None
+
+
+class GeminiStub:
+    """Gemini APIスタブ（本ステップでは未実装）"""
+
+    def __init__(self, model_info: ModelInfo) -> None:
+        self.model_info = model_info
+
+    def complete(self, system, messages, max_tokens=1000, temperature=0.7):
+        raise NotImplementedError(
+            f"Gemini adapter is not yet implemented (model: {self.model_info.model_id})"
+        )
+
+
+def create_adapter(
+    model_info: ModelInfo,
+    max_retries: int | None = None,
+    allow_temperature_fallback: bool = True,
+) -> "AnthropicAdapter | OpenAICompatAdapter | GeminiStub | Any":
+    """
+    ModelInfoからアダプタを自動選択して生成する
+
+    max_retries: adapter / SDK の内部リトライを上書きする
+    （None → 従来どおり）。
+    allow_temperature_fallback: temperature エラー時に、temperature を外して
+    同一 logical call 内で再送する従来の互換フォールバックを許可する。
+    """
+    if model_info.adapter_type == "anthropic":
+        return AnthropicAdapter(
+            model_info,
+            max_retries=max_retries,
+            allow_temperature_fallback=allow_temperature_fallback,
+        )
+    elif model_info.adapter_type == "openai_compat":
+        return OpenAICompatAdapter(
+            model_info,
+            max_retries=max_retries,
+            allow_temperature_fallback=allow_temperature_fallback,
+        )
+    elif model_info.adapter_type == "gemini":
+        # GeminiはOpenAI互換エンドポイントを使用（google-genai SDK不要）
+        return OpenAICompatAdapter(
+            model_info,
+            max_retries=max_retries,
+            allow_temperature_fallback=allow_temperature_fallback,
+        )
+    elif model_info.adapter_type == "devrelay_http":
+        # サイクル10.7: DevRelayサーバー経由のサブスク実験席（正式ロスター外）。
+        # 循環import回避のため分岐内で遅延import（llm.providers.devrelay_httpは
+        # llm.adapters.AdapterErrorに依存するため、モジュール先頭でのimportは避ける）。
+        from llm.providers.devrelay_http import HttpAgentProvider
+        return HttpAgentProvider(
+            model_info,
+            max_retries=max_retries,
+            allow_temperature_fallback=allow_temperature_fallback,
+        )
+    else:
+        raise ValueError(f"Unknown adapter type: {model_info.adapter_type}")
