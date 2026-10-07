@@ -283,3 +283,49 @@ def test_parse_post_game_reflection_truncates_long_comment():
     result = parse_post_game_reflection(text, max_chars=50)
     assert result["truncated"] is True
     assert len(result["comment"]) == 50
+
+
+# --- 末尾の殻の取りこぼし（サイクル2.1、試走r1_12p_2001のP03で発見） ---
+
+def test_parse_post_game_reflection_strips_trailing_brace():
+    """閉じクォート無しで末尾に"}"が残る壊れ方を直す"""
+    text = '{"emotion": "哀", "comment": "次があれば徹底したい。}'
+    result = parse_post_game_reflection(text, max_chars=500)
+    assert result["status"] == "ok_recovered"
+    assert result["comment"] == "次があれば徹底したい。"
+
+
+def test_parse_post_game_reflection_strips_trailing_quote_and_bracket():
+    """"}" 以外の殻（"] や , 等）も落とす"""
+    for tail, expected in [
+        ('"}', "本文"),
+        ('"]}', "本文"),
+        ('\n}', "本文"),
+        (',', "本文"),
+    ]:
+        text = '{"comment": "本文' + tail
+        result = parse_post_game_reflection(text, max_chars=500)
+        assert result["comment"] == expected, (tail, result["comment"])
+
+
+def test_parse_post_game_reflection_closed_quote_not_stripped():
+    """閉じクォートがある正常なJSONには殻の除去を適用しない（過剰除去の防止）"""
+    text = json.dumps({"comment": "普通の感想}"}, ensure_ascii=False)
+    result = parse_post_game_reflection(text, max_chars=500)
+    assert result["status"] == "ok"
+    assert result["comment"] == "普通の感想}"
+
+
+def test_parse_post_game_reflection_plaintext_not_stripped():
+    """プレーンテキストのフォールバックには殻の除去を適用しない（過剰除去の防止）"""
+    result = parse_post_game_reflection("感想です}", max_chars=500)
+    assert result["status"] == "ok_plaintext"
+    assert result["comment"] == "感想です}"
+
+
+def test_parse_post_game_reflection_japanese_closing_punctuation_preserved():
+    """日本語の閉じ括弧・句読点は殻の除去で落とさない（過剰除去の防止）"""
+    text = '{"comment": "最後は「これだ」と言いたい'
+    result = parse_post_game_reflection(text, max_chars=500)
+    assert result["status"] == "ok_recovered"
+    assert result["comment"] == "最後は「これだ」と言いたい"

@@ -75,7 +75,10 @@ class Game:
             持ち越し消滅の有無）は打ち切り地点では一切発火しない
             （gentei-janken `--stop-after-turn` と同じ思想。「実行だけ」の
             打ち切りであり、ゲームルールの短縮ではない）。既定Noneは
-            従来どおり最後まで実行する。
+            従来どおり最後まで実行する。この値が`config.num_rounds`未満の
+            ときは、試合後の振り返り（§9.4）も行わない（サイクル2.1。
+            全ラウンドを前提とするプロンプトで未発生の出来事を語らせない
+            ため）。
     """
 
     def __init__(
@@ -144,9 +147,15 @@ class Game:
         `stop_after_round` 指定時は、そのラウンドの処理を終えた時点で
         ループを抜ける（「実行だけ」の打ち切り。`is_final` は
         `config.num_rounds` 基準のままなので、打ち切り地点を最終ラウンド
-        扱いにしない＝持ち越しは消滅させない）。
+        扱いにしない＝持ち越しは消滅させない）。打ち切った場合
+        （`stop_after_round < config.num_rounds`）は試合後の振り返り
+        （`_phase_post_game_reflection`）を呼ばない（サイクル2.1。
+        `stop_after_round == config.num_rounds` は最後まで回した扱いで
+        従来どおり呼ぶ）。
         """
         self._setup()
+
+        stopped_early = False
 
         for round_num in range(1, self.config.num_rounds + 1):
             self.current_round = round_num
@@ -165,11 +174,20 @@ class Game:
             self._phase_reflect(round_num)
 
             if self._stop_after_round is not None and round_num >= self._stop_after_round:
+                stopped_early = round_num < self.config.num_rounds
                 break
 
         result = self._finalize()
-        self._phase_post_game_reflection(result)
-        result = result.model_copy(update={"post_game_reflections": dict(self.post_game_reflections)})
+        if not stopped_early:
+            # 途中で打ち切った試合では行わない（サイクル2.1）。試走
+            # （r1_12p_2001）で、1ラウンドで打ち切ったのに「全12ラウンドが
+            # 終わった」前提のプロンプト（build_post_game_reflection_prompt）
+            # で聞いてしまい、全席が起きていない出来事を語った事故の再発防止。
+            # stop_after_round指定時でもnum_rounds基準なら通常どおり行う。
+            self._phase_post_game_reflection(result)
+            result = result.model_copy(
+                update={"post_game_reflections": dict(self.post_game_reflections)},
+            )
         return result
 
     def _phase_reflect(self, round_num: int) -> None:
@@ -411,16 +429,25 @@ class Game:
                 "type": "dm", "from": pid, "to": action.to,
                 "message": action.message, "turn": turn,
             })
+            # message本文はイベントログにも残す（観戦者のみ全DMが見える、§8）。
+            # _build_visible_state（プレイヤーへの可視状態）はこのイベントを
+            # 経由しないため、本人以外のプレイヤーに見える情報は変わらない
+            # （サイクル2.1。従来はllm_calls側のレスポンス本文からしか
+            # 復元できなかった記録を、イベント単体で完結させる）。
             self.logger.log("NEGOTIATION_ACTION", round_num, "negotiation", data={
                 "player_id": pid, "action": "dm", "to": action.to, "turn": turn,
+                "message": action.message,
             })
         elif isinstance(action, BroadcastAction):
             self._round_messages.append({
                 "type": "broadcast", "from": pid, "to": None,
                 "message": action.message, "turn": turn,
             })
+            # broadcastは元々全員に見えるため、本文をイベントへ残しても
+            # プレイヤーへの可視状態（§8の公開区分）は変わらない（サイクル2.1）。
             self.logger.log("NEGOTIATION_ACTION", round_num, "negotiation", data={
                 "player_id": pid, "action": "broadcast", "turn": turn,
+                "message": action.message,
             })
         elif isinstance(action, TransferAction):
             self.players[pid] = player_ops.pay(self.players[pid], action.amount)
@@ -450,9 +477,14 @@ class Game:
                 round_created=round_num, contract_id=contract_id,
             )
             self.contracts.append(contract)
+            # obligations（義務の一覧）もイベントへ残す（観戦者のみ全契約内容が
+            # 見える、§8）。_build_visible_state側は従来どおり当事者以外へは
+            # contract_id・parties・contract_seqだけしか出さないため、
+            # プレイヤーへの可視状態は変わらない（サイクル2.1）。
             self.logger.log("CONTRACT_PROPOSED", round_num, "negotiation", data={
                 "contract_id": contract.contract_id, "proposer": pid,
                 "parties": parties, "turn": turn,
+                "obligations": [ob.model_dump(mode="json") for ob in contract.obligations],
             })
         elif isinstance(action, ContractSignAction):
             # 契約署名（§6.1）。全当事者の署名がそろった瞬間にcontract_seqを

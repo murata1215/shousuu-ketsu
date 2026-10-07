@@ -235,7 +235,31 @@ class ProgressPrinter:
         with self._lock:
             if not info["ok"]:
                 self.fail_counts[info["player_id"]] = self.fail_counts.get(info["player_id"], 0) + 1
-            print(line)
+            # 出力先がファイル（nohup等）でもブロックバッファに溜め込まず
+            # 1行ごとにすぐ書き出す（サイクル2.1。長い試合をtail -fで追えるように）。
+            print(line, flush=True)
+
+
+def _enable_line_buffering(stream: Any) -> bool:
+    """
+    標準出力がファイルへリダイレクトされていても、1行ごとに書き出されるようにする
+
+    （サイクル2.1）。`nohup ... > file` のようにリダイレクトすると、Pythonは
+    端末向けの行バッファから完全バッファへ自動的に切り替わり、途中経過が
+    バッファに溜まって`tail -f`で見えなくなる。`reconfigure(line_buffering=True)`
+    （Python 3.7+の`io.TextIOWrapper`が持つ）で明示的に行バッファへ戻す。
+
+    `reconfigure` を持たないストリーム（テストで差し替える`io.StringIO`等）には
+    何もせず `False` を返す（pytestのcapsys差し替え等で壊れないようにするため）。
+
+    Returns:
+        reconfigureを実際に呼べた（＝適用できた）ならTrue
+    """
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure is None:
+        return False
+    reconfigure(line_buffering=True)
+    return True
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -411,6 +435,12 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
 
     llm_logger.save()
 
+    if args.stop_after_round is not None and args.stop_after_round < config.num_rounds:
+        print(
+            f"\n[post_game] 実行をR{args.stop_after_round}で打ち切ったため、"
+            f"試合後の振り返りは行いません（ルール上はR{config.num_rounds}）。",
+        )
+
     print("\n=== 結果 ===")
     print(json.dumps({
         "final_ranks": result.final_ranks, "final_assets": result.final_assets,
@@ -435,6 +465,7 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
 
 
 def main() -> None:
+    _enable_line_buffering(sys.stdout)
     parser = _build_arg_parser()
     args = parser.parse_args()
     outcome = run_trial(args)

@@ -410,6 +410,24 @@ def _salvage_string(fragment: str) -> str:
         )
 
 
+_SALVAGED_TAIL_RE = re.compile(r'[\s"\'}\],]+$')
+
+
+def _strip_salvaged_json_tail(text: str) -> str:
+    """
+    閉じクォートが無いまま応答が打ち切られた場合に、本文の末尾へ残る
+    JSONの殻（空白・" ' } ] ,）を落とす（サイクル2.1）。
+
+    試走（r1_12p_2001のP03）で、`{"emotion": "哀", "comment": "…徹底したい。}` の
+    ように閉じクォートが無いまま末尾の`}`だけが本文に取り込まれ、記録に
+    残ってしまった事故の再発防止。`_COMMENT_FIELD_OPEN_RE`（閉じクォート無し＝
+    応答が本文の途中で打ち切られた場合）の救出結果にのみ適用し、閉じクォート
+    ありの正常な救出（`_COMMENT_FIELD_RE`）やプレーンテキストには適用しない
+    （日本語の句読点「」『』）】等は対象外で、過剰に削らない）。
+    """
+    return _SALVAGED_TAIL_RE.sub("", text)
+
+
 def parse_post_game_reflection(text: str | None, max_chars: int) -> dict[str, Any]:
     """
     試合後の振り返り（§9.4 POST_GAME_REFLECTION）応答を解析する
@@ -444,7 +462,7 @@ def parse_post_game_reflection(text: str | None, max_chars: int) -> dict[str, An
         else:
             m = _COMMENT_FIELD_OPEN_RE.search(stripped)
             if m:
-                comment = _salvage_string(m.group(1))
+                comment = _strip_salvaged_json_tail(_salvage_string(m.group(1)))
         if comment and comment.strip():
             status = "ok_recovered"
             salvaged = True
