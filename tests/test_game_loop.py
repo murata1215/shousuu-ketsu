@@ -90,6 +90,37 @@ def test_auto_commit_when_commit_always_fails() -> None:
     assert summary.votes["P01"] in (Vote.YES, Vote.NO)
 
 
+def test_my_finance_marks_pre_debt_as_not_repayable() -> None:
+    """財務通知のmy_financeに、開始前の借金が返済不可である表示が付く（§3.5 v0.3）"""
+    from engine.models import PassAction
+    from tests.helpers import ScriptedAgent
+
+    class _RecordingAgent(ScriptedAgent):
+        def __init__(self, player_id: str) -> None:
+            super().__init__(player_id)
+            self.seen_states: list[dict] = []
+
+        def negotiate(self, player_state, round_num, turn, visible_state):
+            self.seen_states.append(visible_state)
+            return PassAction(player_id=self.player_id)
+
+    recorder = _RecordingAgent("P01")
+    agents = {
+        pid: (recorder if pid == "P01" else ScriptedAgent(pid))
+        for pid in (f"P{i:02d}" for i in range(1, 13))
+    }
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=1, logger=EventLogger())
+    game.run()
+
+    assert recorder.seen_states, "negotiateが一度も呼ばれていない"
+    my_finance = recorder.seen_states[0]["my_finance"]
+    assert my_finance["debt_pre_repayable"] is False
+    assert "返済不可" in my_finance["debt_pre_note"]
+    # 既存キーは消えていない（値ではなく表示を足すだけ、プラン§2）
+    assert "debt_pre" in my_finance and "debt_post" in my_finance
+
+
 def test_same_seed_produces_identical_result() -> None:
     """同じシードで2回回して、結果が完全に一致すること"""
     config = GameConfig.default_12()

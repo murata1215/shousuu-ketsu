@@ -9,7 +9,11 @@ min を返すよう直した（gentei版は単一 `debt` フィールド基準�
 サイクル1.2（Bot検証）で既定の `negotiate()` を「常にpass」に変更した
 （計画§1）。サイクル1.0のBotにあった「借金があれば利息を止めるため
 全額返済」は、借入3通りBot（§12.1検証）のうち「借りて返す」役だけに
-残す（_try_full_repay はヘルパとしてそのまま提供）。
+残していたが、サイクル1.3（仕様書v0.3、§3.5）で返済が開始後の借金
+（3%）にしか効かなくなり、その役は成り立たなくなって削除した
+（bots/loan_bot.py参照）。_try_full_repay はどのBotからも呼ばれなく
+なったが、新ルールに合わせて直した上でヘルパとして残す（CLAUDE.md
+過去の落とし穴③: 孤児コードを残さない）。
 """
 
 import random
@@ -44,14 +48,15 @@ class BotAgent(PlayerAgent):
 
     def _try_full_repay(self, player_state: PlayerState) -> Action | None:
         """
-        利息を止めるための全額任意返済（§3.5）
+        開始後の借金（3%）を止めるための全額任意返済（§3.5、v0.3）
 
-        2種の借金合計と現金の小さい方を返済額にする
-        （実際の充当順は engine/player.py::repay() が3%優先で行う）。
+        開始前の借金（1.5%）は最後まで返済できないため対象外。
+        開始後の借金残高と現金の小さい方を返済額にする。開始後の借金が
+        無ければ何もしない（None、§12.3 #26・#27）。
         """
-        if player_state.total_debt <= 0:
+        if player_state.debt_post <= 0:
             return None
-        amount = min(player_state.total_debt, player_state.cash)
+        amount = min(player_state.debt_post, player_state.cash)
         if amount <= 0:
             return None
         return RepayAction(player_id=player_state.player_id, amount=amount)

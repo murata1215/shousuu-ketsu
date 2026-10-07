@@ -19,7 +19,7 @@ from sim.recorder import RecordingAgent
 from bots.always_no_bot import AlwaysNoBot
 from bots.always_yes_bot import AlwaysYesBot
 from bots.follow_bot import FollowMajorityBot, FollowMinorityBot
-from bots.loan_bot import LoanMaxHoldBot, LoanMaxRepayBot, LoanMinBot
+from bots.loan_bot import LoanMaxHoldBot, LoanMidHoldBot, LoanMinBot
 from bots.pair_bot import BetrayerPairBot, PairSplitBot
 from bots.random_vote_bot import RandomVoteBot
 from tests.helpers import RandomContractAgent
@@ -101,9 +101,14 @@ def _s4_betrayal_pairs(seed: int) -> dict[str, RecordingAgent]:
 
 
 def _s5_loan_types(seed: int) -> dict[str, RecordingAgent]:
-    assignment = ["LoanMin"] * 4 + ["LoanMaxRepay"] * 4 + ["LoanMaxHold"] * 4
+    """
+    借入3通り（120万／500万／1000万を持ち続ける）を4人ずつに組み替えた
+    （サイクル1.3、仕様書v0.3§3.5。1000万を借りてR1に返す役は返済ルール
+    変更で成り立たなくなったため外した）
+    """
+    assignment = ["LoanMin"] * 4 + ["LoanMid"] * 4 + ["LoanMaxHold"] * 4
     cls_by_label = {
-        "LoanMin": LoanMinBot, "LoanMaxRepay": LoanMaxRepayBot, "LoanMaxHold": LoanMaxHoldBot,
+        "LoanMin": LoanMinBot, "LoanMid": LoanMidHoldBot, "LoanMaxHold": LoanMaxHoldBot,
     }
     agents: dict[str, RecordingAgent] = {}
     for pid, label in zip(PLAYER_IDS, assignment):

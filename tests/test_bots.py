@@ -8,7 +8,7 @@ PlayerState/visible_stateを直接組み立てて各Botのメソッドを呼ぶ�
 from bots.always_no_bot import AlwaysNoBot
 from bots.base import BotAgent
 from bots.follow_bot import FollowMajorityBot, FollowMinorityBot
-from bots.loan_bot import LoanMaxHoldBot, LoanMaxRepayBot, LoanMinBot
+from bots.loan_bot import LOAN_MID, LoanMaxHoldBot, LoanMidHoldBot, LoanMinBot
 from bots.pair_bot import BetrayerPairBot, PairSplitBot
 from engine.config import GameConfig
 from engine.models import (
@@ -37,6 +37,22 @@ def test_default_negotiate_is_always_pass_even_with_debt() -> None:
     p = _player(cash=1_000_000, debt_pre=500_000)
     action = bot.negotiate(p, round_num=1, turn=1, visible_state={})
     assert isinstance(action, PassAction)
+
+
+def test_try_full_repay_repays_post_debt_only() -> None:
+    """_try_full_repay（§3.5 v0.3）は開始後の借金だけを対象にする"""
+    bot = _DummyBot("Dummy")
+    p = _player(cash=1_000_000, debt_pre=2_000_000, debt_post=300_000)
+    action = bot._try_full_repay(p)
+    assert isinstance(action, RepayAction)
+    assert action.amount == 300_000
+
+
+def test_try_full_repay_returns_none_without_post_debt() -> None:
+    """開始後の借金が無ければ、開始前の借金が残っていても何もしない"""
+    bot = _DummyBot("Dummy")
+    p = _player(cash=1_000_000, debt_pre=2_000_000, debt_post=0)
+    assert bot._try_full_repay(p) is None
 
 
 # ---------------------------------------------------------------------------
@@ -192,25 +208,17 @@ def test_betrayer_pair_bot_same_seed_is_reproducible() -> None:
 def test_loan_bots_choose_correct_loan_amounts() -> None:
     config = GameConfig.default_12()
     assert LoanMinBot().choose_loan(config) == config.loan_min
-    assert LoanMaxRepayBot().choose_loan(config) == config.loan_max
+    assert LoanMidHoldBot().choose_loan(config) == LOAN_MID
     assert LoanMaxHoldBot().choose_loan(config) == config.loan_max
 
 
-def test_loan_max_repay_bot_repays_880man_only_on_round1_first_turn() -> None:
-    bot = LoanMaxRepayBot(seed=1)
-    p = _player("P01", cash=10_000_000, debt_pre=10_000_000)
-
-    action1 = bot.negotiate(p, round_num=1, turn=1, visible_state={})
-    assert isinstance(action1, RepayAction)
-    assert action1.amount == 8_800_000
-
-    # 同じラウンドの2巡目以降はpass
-    action2 = bot.negotiate(p, round_num=1, turn=2, visible_state={})
-    assert isinstance(action2, PassAction)
-
-    # R2以降もpass（R1限りの返済）
-    action3 = bot.negotiate(p, round_num=2, turn=1, visible_state={})
-    assert isinstance(action3, PassAction)
+def test_loan_mid_hold_bot_never_repays() -> None:
+    """LoanMidHoldBot（500万・サイクル1.3で追加）は常にpass（繰上げ返済なし）"""
+    bot = LoanMidHoldBot(seed=1)
+    p = _player("P01", cash=5_000_000, debt_pre=5_000_000)
+    for round_num in range(1, 13):
+        action = bot.negotiate(p, round_num=round_num, turn=1, visible_state={})
+        assert isinstance(action, PassAction)
 
 
 def test_loan_max_hold_bot_never_repays() -> None:

@@ -296,7 +296,8 @@ class Game:
             self.players[pid] = new_p
             self.logger.log("REPAYMENT", round_num, "negotiation", data={
                 "player_id": pid, "requested": action.amount, "amount": actual, "turn": turn,
-                # 内訳（3%優先充当、§3.5）。test_invariants.py の借金簿記再構成に使う。
+                # 内訳（開始後の借金のみに充当、§3.5 v0.3）。from_preは常に0。
+                # test_invariants.py の借金簿記再構成に使うためキーは残す。
                 "from_post": old_p.debt_post - new_p.debt_post,
                 "from_pre": old_p.debt_pre - new_p.debt_pre,
             })
@@ -598,6 +599,10 @@ class Game:
                 state["my_finance"] = {
                     "cash": me.cash,
                     "debt_pre": me.debt_pre,
+                    # 開始前の借金は最後まで返済できない（§3.5 v0.3）。
+                    # 表示用のフラグと注記を足す（値そのものは変えない）。
+                    "debt_pre_repayable": False,
+                    "debt_pre_note": "返済不可（開始前の借金・1.5%）",
                     "debt_post": me.debt_post,
                     "total_debt": me.total_debt,
                     "remaining_credit": player_ops.remaining_credit(me, self.config),

@@ -149,23 +149,22 @@ def settle_negative_cash(player: PlayerState) -> PlayerState:
 
 def repay(player: PlayerState, amount: int) -> tuple[PlayerState, int]:
     """
-    任意返済を行う（§3.5）
+    任意返済を行う（§3.5、v0.3で変更）
 
-    返済額は min(指定額, 現金, 借金合計) にクランプされる。
-    開始後の借金（3%）から先に充当し、残りを開始前の借金（1.5%）に充てる。
+    開始後の借金（3%）にだけ充てる。開始前の借金（1.5%）は最後まで返済
+    できない。返済額は min(指定額, 現金, 開始後の借金残高) にクランプされ、
+    残高を超える指定分は返済されず手元に残る。開始後の借金が0なら不成立
+    （actual=0。呼び出し前に engine/actions.py::validate_action が拒否する）。
 
     Returns:
         (更新後のplayer, 実際に返済された額)
     """
-    actual = min(amount, player.cash, player.total_debt)
+    actual = min(amount, player.cash, player.debt_post)
     if actual <= 0:
         return player, 0
-    from_post = min(actual, player.debt_post)
-    from_pre = actual - from_post
     new_player = player.model_copy(update={
         "cash": player.cash - actual,
-        "debt_post": player.debt_post - from_post,
-        "debt_pre": player.debt_pre - from_pre,
+        "debt_post": player.debt_post - actual,
     })
     return new_player, actual
 

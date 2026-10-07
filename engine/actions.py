@@ -91,10 +91,15 @@ def validate_action(
         return ActionResult(True)
 
     if isinstance(action, RepayAction):
-        # 返済: 実行額は実際には min(指定額, 現金, 借金合計) にクランプされる
-        # （engine/player.py::repay()）。ここでは「正の額の申告」だけを検証する。
+        # 返済（§3.5、v0.3）: 開始後の借金（3%）にだけ充てられる。開始前の
+        # 借金（1.5%）は最後まで返済できない。実行額は実際には
+        # min(指定額, 現金, 開始後の借金残高) にクランプされる
+        # （engine/player.py::repay()）。ここでは「正の額の申告」と
+        # 「開始後の借金が残っていること」を検証する（§12.3 #26・#27）。
         if action.amount <= 0:
             return ActionResult(False, "Repay amount must be positive")
+        if player.debt_post <= 0:
+            return ActionResult(False, "No post-start debt to repay")
         return ActionResult(True)
 
     if isinstance(action, VoteCommitAction):
