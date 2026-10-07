@@ -14,7 +14,7 @@ dangou-card `engine/game.py` のcontract_propose/contract_signブロック（B�
 `initial_loans` として公開する。
 """
 
-from typing import Any
+from typing import Any, Callable
 
 from engine.autocommit import decide_auto_vote
 from engine.config import GameConfig
@@ -45,6 +45,14 @@ class Game:
         questions: 各ラウンドの質問（§5）。Noneなら仮の固定文言を生成する。
             指定時は長さが config.num_rounds と一致しなければ ValueError
             （質問生成本体はサイクル1.2で実装する）
+        on_question_published: そのラウンドの質問をOpenで公開した直後に
+            (round_num, question) で呼ばれるフック（サイクル1.4で追加）。
+            §5.1「実際に使った質問は、ラウンドで公開した時点で履歴ファイルに
+            1行ずつ追記する」をBot試合・動作確認に影響させずに満たすための
+            通知経路。既定None（何もしない）なら従来どおり履歴に書かない。
+            履歴への実際の追記（data/question_history.jsonl）は
+            llm/questions.py::append_question() を呼ぶ側（AI試合の実行
+            スクリプト）の責務であり、Game自身はファイルに触れない。
     """
 
     def __init__(
@@ -54,6 +62,7 @@ class Game:
         seed: int = 42,
         logger: EventLogger | None = None,
         questions: list[str] | None = None,
+        on_question_published: Callable[[int, str], None] | None = None,
     ) -> None:
         if len(agents) != config.num_players:
             raise ValueError(
@@ -72,6 +81,7 @@ class Game:
         self.rng = GameRng(seed)
         self.logger = logger or EventLogger()
         self.questions = list(questions)
+        self.on_question_published = on_question_published
 
         self.players: dict[str, PlayerState] = {}
         self.carryover: int = 0
@@ -182,10 +192,13 @@ class Game:
         （§7.2）。財務通知は visible_state の生成時に計算するため、ここでは
         ログと公開イベントのみ発行する。
         """
+        question = self.questions[round_num - 1]
         self.logger.log("ROUND_OPEN", round_num, "open", data={
-            "question": self.questions[round_num - 1],
+            "question": question,
             "carryover": self.carryover,
         })
+        if self.on_question_published is not None:
+            self.on_question_published(round_num, question)
 
         ranks = player_ops.assets_ranking(self.players.values())
         for pid in sorted(self.players):

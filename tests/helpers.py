@@ -150,6 +150,47 @@ class RandomContractAgent(PlayerAgent):
         return ContractProposeAction(player_id=pid, with_players=[target], terms=terms)
 
 
+class FakeAdapter:
+    """
+    .complete() が、呼び出し回数に応じて事前に積んだ応答テキストを順番に返す
+    偽アダプタ（llm/llm_agent.py のテスト用。AIを呼ばない）。
+
+    llm/adapters.py の各アダプタと同じダックタイピングインターフェース
+    （complete(system, messages, max_tokens, temperature, request_options)
+    -> tuple[str, dict]）に準拠する。texts の要素がExceptionインスタンスなら
+    そのまま raise する（AdapterError等の模擬）。texts を使い切った後は
+    default_text を繰り返す。
+    """
+
+    DEFAULT_PASS_TEXT = (
+        '{"strategy": {"reason": "pass", "emotion": "楽"}, "action": {"type": "pass"}}'
+    )
+
+    def __init__(
+        self, texts: list[str | Exception] | None = None, default_text: str | None = None,
+    ) -> None:
+        self.texts: list[str | Exception] = list(texts or [])
+        self.default_text = self.DEFAULT_PASS_TEXT if default_text is None else default_text
+        self.calls: list[dict] = []
+        self.seat_key: str | None = None
+
+    def bind_seat(self, seat_key: str) -> None:
+        self.seat_key = seat_key
+
+    def complete(
+        self, system, messages, max_tokens=1000, temperature=0.7, request_options=None,
+    ) -> tuple[str, dict]:
+        self.calls.append({
+            "system": system, "messages": messages,
+            "max_tokens": max_tokens, "temperature": temperature,
+        })
+        item = self.texts.pop(0) if self.texts else self.default_text
+        if isinstance(item, Exception):
+            raise item
+        usage = {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}
+        return item, usage
+
+
 def make_roster(
     votes_by_round: dict[int, dict[str, Vote]], num_players: int = 12, loan: int = 1_200_000,
 ) -> dict[str, ScriptedAgent]:

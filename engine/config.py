@@ -62,6 +62,10 @@ class GameConfig(BaseModel):
     rank_public_rounds: tuple[int, ...] = (3, 6, 9)
     """全員の順位を公開するラウンド（§7.3: R3・R6・R9終了後のFinance後）"""
 
+    # --- 質問生成（§5） ---
+    question_model: str = "DR_HAIKU"
+    """出題AIに使うモデルキー（llm/models.py::MODEL_REGISTRYのキー）。§5.1: 既定は最安級1つ"""
+
     @classmethod
     def default_12(cls) -> "GameConfig":
         """12人版デフォルト設定を返す（仕様書§10の確定パラメータに準拠）"""
