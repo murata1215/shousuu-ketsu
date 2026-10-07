@@ -12,8 +12,18 @@ dangou-card `engine/game.py` のcontract_propose/contract_signブロック（B�
 §7.1手順1でReveal）設計にしているため、1人のCommitが他人に見える経路は
 存在しない。借入額の選択（§3.1）も同様に、全員分を集め切ってから
 `initial_loans` として公開する。
+
+サイクル2.0: `max_parallel_agents`（既定1=従来どおり逐次）を追加した。
+gentei-janken `engine/game.py`（B分類）の3段構えパターン
+（A: 可視状態構築等は逐次 → B: agent呼び出しだけThreadPoolExecutorで並列
+→ C: 状態反映・ログ記録は逐次）をそのまま流用し、借入選択（`_setup`）・
+投票（`_phase_commit`）・ラウンド末振り返り（`run`）・試合後振り返り
+（`_phase_post_game_reflection`）に適用した。交渉（`_phase_negotiation`）は
+1人のアクションが次の手番の可視状態に影響するため並列化しない（指示どおり）。
+並列化しても結果が変わらない理由は各メソッドのdocstringに記す。
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from engine.autocommit import decide_auto_vote
@@ -53,6 +63,19 @@ class Game:
             履歴への実際の追記（data/question_history.jsonl）は
             llm/questions.py::append_question() を呼ぶ側（AI試合の実行
             スクリプト）の責務であり、Game自身はファイルに触れない。
+        max_parallel_agents: 借入選択・投票・振り返り・試合後振り返りで
+            同時に呼び出すエージェント数の上限（サイクル2.0新設）。既定1は
+            従来どおりの逐次実行で結果は完全不変。交渉（Negotiation）は
+            1人のアクションが次の手番の可視状態に影響するため対象外
+            （常に逐次）。
+        stop_after_round: 指定時、このラウンドの処理を終えたら
+            `config.num_rounds` 前でも実行を打ち切る（サイクル2.0新設）。
+            ルール上の総ラウンド数（config.num_rounds）自体は変えないため、
+            プロンプトの残りラウンド表記・最終ラウンド判定（is_final、
+            持ち越し消滅の有無）は打ち切り地点では一切発火しない
+            （gentei-janken `--stop-after-turn` と同じ思想。「実行だけ」の
+            打ち切りであり、ゲームルールの短縮ではない）。既定Noneは
+            従来どおり最後まで実行する。
     """
 
     def __init__(
@@ -63,6 +86,8 @@ class Game:
         logger: EventLogger | None = None,
         questions: list[str] | None = None,
         on_question_published: Callable[[int, str], None] | None = None,
+        max_parallel_agents: int = 1,
+        stop_after_round: int | None = None,
     ) -> None:
         if len(agents) != config.num_players:
             raise ValueError(
@@ -82,6 +107,8 @@ class Game:
         self.logger = logger or EventLogger()
         self.questions = list(questions)
         self.on_question_published = on_question_published
+        self._max_parallel_agents = max_parallel_agents
+        self._stop_after_round = stop_after_round
 
         self.players: dict[str, PlayerState] = {}
         self.carryover: int = 0
@@ -103,6 +130,8 @@ class Game:
         self._current_established_seqs: list[int] = []
         self._last_round_summary: RoundSummary | None = None
         self._public_ranks_history: dict[int, dict[str, int]] = {}
+        self.post_game_reflections: dict[str, dict[str, Any]] = {}
+        """player_id -> post_game_reflect()の戻り値（§9.4、サイクル2.0新設）"""
 
     # ------------------------------------------------------------------
     # メインループ
@@ -111,6 +140,11 @@ class Game:
     def run(self) -> GameResult:
         """
         ゲームを実行する（§7: 12ラウンドを順に処理し、最終結果を返す）
+
+        `stop_after_round` 指定時は、そのラウンドの処理を終えた時点で
+        ループを抜ける（「実行だけ」の打ち切り。`is_final` は
+        `config.num_rounds` 基準のままなので、打ち切り地点を最終ラウンド
+        扱いにしない＝持ち越しは消滅させない）。
         """
         self._setup()
 
@@ -128,13 +162,85 @@ class Game:
             self._phase_finance(round_num)
             self._assert_cash_non_negative(round_num, "finance")
 
-            for pid, agent in self.agents.items():
-                agent.reflect(
-                    self.players[pid], round_num,
-                    self._build_visible_state(round_num, for_player_id=pid),
-                )
+            self._phase_reflect(round_num)
 
-        return self._finalize()
+            if self._stop_after_round is not None and round_num >= self._stop_after_round:
+                break
+
+        result = self._finalize()
+        self._phase_post_game_reflection(result)
+        result = result.model_copy(update={"post_game_reflections": dict(self.post_game_reflections)})
+        return result
+
+    def _phase_reflect(self, round_num: int) -> None:
+        """
+        ラウンド終了後の振り返り（§9.4）を全員へ呼ぶ。
+
+        3段構え（サイクル2.0）: A. 可視状態の構築は逐次（ゲーム状態は
+        変更しない読み取りのみ）、B. agent.reflect()の呼び出しは
+        max_parallel_agents>1ならThreadPoolExecutorで並列、C.
+        reflect()は戻り値を返さずログも出さないため、Cで行うことは無い
+        （各エージェントが書き込むのは自分自身の_memoryのみで、Gameの
+        状態を一切変更しないため並列化しても結果は変わらない）。
+        """
+        pending = [
+            (pid, self.players[pid], self._build_visible_state(round_num, for_player_id=pid))
+            for pid in sorted(self.agents)
+        ]
+
+        def _call(pid: str, player: PlayerState, visible_state: dict[str, Any]) -> None:
+            self.agents[pid].reflect(player, round_num, visible_state)
+
+        if self._max_parallel_agents > 1 and len(pending) > 1:
+            with ThreadPoolExecutor(max_workers=self._max_parallel_agents) as pool:
+                futures = [pool.submit(_call, pid, player, vs) for pid, player, vs in pending]
+                for future in as_completed(futures):
+                    future.result()
+        else:
+            for pid, player, vs in pending:
+                _call(pid, player, vs)
+
+    def _phase_post_game_reflection(self, result: GameResult) -> None:
+        """
+        試合完全終了後の振り返り（§9.4）を全員へ1回だけ呼ぶ（サイクル2.0新設）。
+
+        ゲーム結果が確定した`_finalize()`の後にのみ呼ぶ。失敗は記録のみで
+        試合結果（GameResult本体の資産・順位等）には一切影響しない
+        （post_game_reflect()はPlayerAgent規定でNoneを返せる設計で、
+        例外もここで握りつぶす）。3段構えはrun()の_phase_reflectと同じ。
+        """
+        ranks = player_ops.assets_ranking(self.players.values())
+        pending = sorted(self.agents)
+
+        def _call(pid: str) -> dict[str, Any] | None:
+            r = ranks[pid]
+            context = {
+                "own_rank": r.rank,
+                "own_rank_tied": r.tied,
+                "final_assets": result.final_assets.get(pid),
+            }
+            try:
+                return self.agents[pid].post_game_reflect(context)
+            except Exception:
+                return None
+
+        if self._max_parallel_agents > 1 and len(pending) > 1:
+            results: dict[str, dict[str, Any] | None] = {}
+            with ThreadPoolExecutor(max_workers=self._max_parallel_agents) as pool:
+                futures = {pool.submit(_call, pid): pid for pid in pending}
+                for future in as_completed(futures):
+                    results[futures[future]] = future.result()
+        else:
+            results = {pid: _call(pid) for pid in pending}
+
+        for pid in pending:
+            comment = results.get(pid)
+            if comment is None:
+                continue
+            self.post_game_reflections[pid] = comment
+            self.logger.log("POST_GAME_REFLECTION", self.config.num_rounds, "finance", data={
+                "player_id": pid, **comment,
+            })
 
     def _assert_cash_non_negative(self, round_num: int, phase: str) -> None:
         """
@@ -161,6 +267,12 @@ class Game:
         `PlayerAgent.choose_loan()` は config しか受け取らないため、構造的に
         他プレイヤーの借入額を参照できない（§3.1「他のAIの借入額を見てから
         決めることはできない」を型レベルで保証する）。
+
+        3段構え（サイクル2.0）: A. 呼び出す対象の収集（pid順、逐次）、
+        B. choose_loan()の呼び出しはmax_parallel_agents>1なら
+        ThreadPoolExecutorで並列（引数がconfigのみで他プレイヤーの状態を
+        一切参照できないため、並列化しても結果は変わらない）、C. clamp・
+        player生成・ログ記録はpid順に逐次（1回だけ、決定性を保つ）。
         """
         self.logger.log("GAME_START", 0, "setup", data={
             "num_players": self.config.num_players,
@@ -168,10 +280,23 @@ class Game:
             "seed": self.seed,
         })
 
+        pids = sorted(self.agents)
+
+        def _call(pid: str) -> int:
+            return self.agents[pid].choose_loan(self.config)
+
+        if self._max_parallel_agents > 1 and len(pids) > 1:
+            raw_loans: dict[str, int] = {}
+            with ThreadPoolExecutor(max_workers=self._max_parallel_agents) as pool:
+                futures = {pool.submit(_call, pid): pid for pid in pids}
+                for future in as_completed(futures):
+                    raw_loans[futures[future]] = future.result()
+        else:
+            raw_loans = {pid: _call(pid) for pid in pids}
+
         loans: dict[str, int] = {}
-        for pid, agent in self.agents.items():
-            loan = agent.choose_loan(self.config)
-            loan = max(self.config.loan_min, min(self.config.loan_max, loan))
+        for pid in pids:
+            loan = max(self.config.loan_min, min(self.config.loan_max, raw_loans[pid]))
             loans[pid] = loan
 
         for pid, loan in loans.items():
@@ -364,24 +489,50 @@ class Game:
         無効な出力は1回だけ再試行し、それでも駄目ならシステムが代行する
         （§4.4）。投票は全員から集め切ってから Settlement の Reveal で
         公開する（締切後に変更不可、他人に見えない）。
+
+        3段構え（サイクル2.0）: A. 可視状態の構築はpid順に逐次
+        （締切前なので他人の投票先はまだ存在せず、構築順は結果に影響しない）、
+        B. agent.commit()の1回＋再試行1回はmax_parallel_agents>1なら
+        ThreadPoolExecutorで並列（Gameの状態を書き換えないため並列化しても
+        結果は変わらない）、C. 自動代行の決定（self.rngを消費）・参加費徴収・
+        ログ記録はpid順に逐次実行する——自動代行の乱数消費順を並列実行の
+        完了順に委ねると同一seedでも並列/逐次で結果がずれてしまうため、
+        Cだけは必ずpid順に固定する。
         """
-        votes: dict[str, Vote] = {}
-        auto_ids: list[str] = []
+        pids = sorted(self.players)
+        pending = [
+            (pid, self.players[pid], self._build_visible_state(round_num, for_player_id=pid))
+            for pid in pids
+        ]
 
-        for pid in sorted(self.players):
-            p = self.players[pid]
+        def _attempt_commit(pid: str, p: PlayerState, visible_state: dict[str, Any]) -> Vote | None:
             agent = self.agents[pid]
-            visible_state = self._build_visible_state(round_num, for_player_id=pid)
-
-            vote: Vote | None = None
             for _attempt in range(2):  # 本番1回＋再試行1回（§4.4）
                 try:
                     candidate = agent.commit(p, round_num, visible_state)
                 except Exception:
                     candidate = None
                 if isinstance(candidate, Vote):
-                    vote = candidate
-                    break
+                    return candidate
+            return None
+
+        if self._max_parallel_agents > 1 and len(pending) > 1:
+            candidates: dict[str, Vote | None] = {}
+            with ThreadPoolExecutor(max_workers=self._max_parallel_agents) as pool:
+                futures = {
+                    pool.submit(_attempt_commit, pid, p, vs): pid for pid, p, vs in pending
+                }
+                for future in as_completed(futures):
+                    candidates[futures[future]] = future.result()
+        else:
+            candidates = {pid: _attempt_commit(pid, p, vs) for pid, p, vs in pending}
+
+        votes: dict[str, Vote] = {}
+        auto_ids: list[str] = []
+
+        for pid in pids:
+            p = self.players[pid]
+            vote = candidates[pid]
 
             if vote is None:
                 constraint = contract_ops.vote_constraint_for_round(

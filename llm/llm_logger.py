@@ -187,6 +187,67 @@ class LLMLogger:
             except Exception:
                 pass
 
+    def log_failed_call(
+        self, *, player_id: str, model_id: str, phase: str, round_num: int,
+        turn: int | None, system_prompt: str, user_prompt: str,
+        error: str, error_type: str, elapsed_ms: float,
+    ) -> None:
+        """
+        API呼び出しそのものが失敗した（AdapterError・想定外の例外・タイムアウト等）
+        コールを、通常の成功callと区別して記録する（サイクル2.0新設）。
+
+        log_budget_block()（事前予約でAPIを呼ばずに止まったケース）とは別物:
+        ここはAPIを実際に呼んだが失敗した場合に使う。api_called=True,
+        budget_blocked=False のまま error/error_type を埋めることで、
+        要約コマンド（scripts/summarize_trial.py）が「時間切れ」「無効な応答」を
+        api_called×error_type から正しく集計できるようにする。
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
+            "player_id": player_id, "model_id": model_id, "phase": phase,
+            "round_num": round_num, "turn": turn, "system_prompt": system_prompt,
+            "user_prompt": user_prompt, "response_text": "", "input_tokens": 0,
+            "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0,
+            "api_called": True, "budget_blocked": False,
+            "elapsed_ms": elapsed_ms, "error": error, "error_type": error_type,
+        }
+        with self._lock:
+            self._entries.append(entry)
+            try:
+                self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self._file.flush()
+            except Exception:
+                pass
+
+    def log_invalid_response(
+        self, *, player_id: str, model_id: str, phase: str, round_num: int,
+        turn: int | None, reason: str,
+    ) -> None:
+        """
+        APIは応答したが解析に失敗した（無効な応答）ことを記録する軽量マーカー行
+        （サイクル2.0新設）。
+
+        その呼び出し自体の生応答・usage・コストは、同じ`_call()`内で先に
+        `log_call()`が通常どおり記録済み。このマーカーは「要約コマンド
+        （scripts/summarize_trial.py）が無効な応答の件数を`invalid_response`
+        フラグの有無だけで席ごとに集計できる」ことだけを目的に追加する
+        軽量な別行であり、`log_call()`の記録内容・呼び出し回数カウントには
+        影響しない。
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
+            "player_id": player_id, "model_id": model_id, "phase": phase,
+            "round_num": round_num, "turn": turn, "invalid_response": True,
+            "reason": reason, "api_called": True, "budget_blocked": False, "cost_usd": 0.0,
+        }
+        with self._lock:
+            self._entries.append(entry)
+            try:
+                self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self._file.flush()
+            except Exception:
+                pass
+
     def close(self) -> None:
         """ファイルハンドルを閉じる"""
         with self._lock:

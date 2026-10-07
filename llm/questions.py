@@ -217,21 +217,26 @@ def _extract_questions_json(text: str) -> list[str] | None:
     return None
 
 
-def _build_question_prompt(recent: list[str]) -> tuple[str, str]:
+def _build_question_prompt(recent: list[str], samples: list[str] | None = None) -> tuple[str, str]:
     """出題AIへ送る(system, user)プロンプトを作る（§5.1: プレイヤー・試合状況は渡さない）"""
     system = (
         "あなたは「くだらない質問」を作るAIです。これから出す指示にだけ従い、"
         "JSON形式で質問のリストだけを返してください。"
     )
     recent_block = "\n".join(f"- {q}" for q in recent) if recent else "（まだ履歴はありません）"
+    samples_block = (
+        "\n".join(f"- {q}" for q in samples) if samples else "（見本はありません）"
+    )
     user = (
         f"YES/NOで答えられる、くだらない断定文を{QUESTION_COUNT}問作ってください。\n"
         "条件:\n"
         f"- 1問は{MAX_QUESTION_LEN}字以内\n"
         "- 予備知識なしで誰でも意味が分かる\n"
+        "- クイズや豆知識の問題にしない。くだらない、どうでもいい断定にする\n"
         "- 政治・宗教・実在の人物・差別・性・暴力に一切触れない\n"
         f"- {QUESTION_COUNT}問どうしで内容やテーマが重複しない\n"
         "- 以下の「直近使った質問」とは内容がかぶらないようにする\n\n"
+        f"## 見本（このくらいくだらない断定にする。質問の種類や分類は自由）\n{samples_block}\n\n"
         f"## 直近使った質問\n{recent_block}\n\n"
         "出力は必ず次のJSON形式だけにしてください: "
         f'{{"questions": ["質問1", "質問2", ... （{QUESTION_COUNT}個）]}}'
@@ -284,6 +289,8 @@ def generate_questions(
     _validate_fallback_pool()
     recent = recent_questions(history_path, HISTORY_SIZE)
     recent_set = set(recent)
+    sample_rng = random.Random(seed)
+    samples = sample_rng.sample(FALLBACK_QUESTIONS, k=min(5, len(FALLBACK_QUESTIONS)))
 
     raw_text: str | None = None
     error: str | None = None
@@ -298,7 +305,7 @@ def generate_questions(
             key = model_key or getattr(config, "question_model", None) or "DR_HAIKU"
             model_info = get_model(key)
             active_adapter = create_adapter(model_info)
-        system, user = _build_question_prompt(recent)
+        system, user = _build_question_prompt(recent, samples)
         text, _usage = active_adapter.complete(
             system=system,
             messages=[{"role": "user", "content": user}],

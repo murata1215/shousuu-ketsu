@@ -202,6 +202,37 @@ def test_generate_questions_calls_adapter_exactly_once(tmp_path):
     assert len(adapter.calls) == 1
 
 
+# --- サイクル2.0: 質問生成の指示文（クイズ・豆知識にしない／見本5問） ---
+
+def test_prompt_bans_quiz_and_trivia_wording(tmp_path):
+    history = tmp_path / "question_history.jsonl"
+    adapter = FakeQuestionAdapter(text=_ai_text(VALID_12))
+    generate_questions(adapter=adapter, history_path=history, seed=11)
+    user_prompt = adapter.calls[0]["messages"][0]["content"]
+    assert "クイズや豆知識の問題にしない" in user_prompt
+
+
+def test_prompt_includes_5_fallback_samples_reproducible_by_seed(tmp_path):
+    history = tmp_path / "question_history.jsonl"
+    adapter_a = FakeQuestionAdapter(text=_ai_text(VALID_12))
+    generate_questions(adapter=adapter_a, history_path=history, seed=20)
+    adapter_b = FakeQuestionAdapter(text=_ai_text(VALID_12))
+    generate_questions(adapter=adapter_b, history_path=history, seed=20)
+
+    prompt_a = adapter_a.calls[0]["messages"][0]["content"]
+    prompt_b = adapter_b.calls[0]["messages"][0]["content"]
+    assert prompt_a == prompt_b  # 同じseedなら見本も同じ（再現可能）
+
+    samples_in_prompt = [q for q in FALLBACK_QUESTIONS if q in prompt_a]
+    assert len(samples_in_prompt) == 5
+
+    # 違うseedなら見本の選び方が変わりうる
+    adapter_c = FakeQuestionAdapter(text=_ai_text(VALID_12))
+    generate_questions(adapter=adapter_c, history_path=history, seed=21)
+    prompt_c = adapter_c.calls[0]["messages"][0]["content"]
+    assert prompt_c != prompt_a
+
+
 # --- 履歴への追記 ---
 
 def test_append_question_then_recent_questions_reads_it_back(tmp_path):

@@ -7,6 +7,7 @@ dangou-card `engine/negotiation.py`（B分類）の `PlayerAgent`/`StubAgent` �
 """
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from engine.config import GameConfig
 from engine.models import Action, PassAction, PlayerState, Vote
@@ -91,6 +92,24 @@ class PlayerAgent(ABC):
             player_state: 自分のプレイヤー状態
             round_num: 終了したラウンドの番号
             visible_state: 公開情報の辞書（当ラウンドの結果を含む）
+        """
+        return None
+
+    def post_game_reflect(self, post_game_context: dict[str, Any]) -> dict[str, Any] | None:
+        """
+        試合完全終了後の振り返り機会（既定は何もしない、§9.4）
+
+        Bot/StubAgentはオーバーライド不要。LLMAgentが既に実装を持つ
+        （llm/llm_agent.py::LLMAgent.post_game_reflect()）。サイクル2.0で
+        Game.run()からの配線を追加するにあたり、抽象基底にも既定no-opとして
+        追加した（Botへの機能追加なしでGame側から全エージェントに安全に
+        呼べるようにするため）。
+
+        Args:
+            post_game_context: 最終順位・最終資産等（engine/game.py側で構築）
+
+        Returns:
+            既定はNone（コメントなし）
         """
         return None
 

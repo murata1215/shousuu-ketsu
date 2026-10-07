@@ -381,6 +381,12 @@ class GameResult(BaseModel):
     total_forfeited_remainder: int
     """配当の端数処理で没収された合計額（§4.3）"""
 
+    post_game_reflections: dict[str, dict] = Field(default_factory=dict)
+    """player_id -> post_game_reflect()の戻り値（§9.4、サイクル2.0新設）。
+
+    取得に失敗した・そもそも実装していない席は含まれない（既定は空辞書で、
+    既存のGameResult利用箇所への影響はない）。"""
+
 
 # =============================================================================
 # イベント（ログ用）

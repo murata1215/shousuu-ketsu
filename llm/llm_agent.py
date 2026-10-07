@@ -23,14 +23,14 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import ValidationError
 
 from engine.config import GameConfig
 from engine.models import Action, PassAction, PlayerState, Vote, VoteCommitAction
 from engine.negotiation import PlayerAgent
-from llm.adapters import AdapterError
+from llm.adapters import AdapterError, _classify_error
 from llm.constants import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, MAX_RETRIES
 from llm.costing import usage_cost, worst_case_cost
 from llm.game_cost_budget import BudgetBlockedError, GameCostBudget
@@ -87,6 +87,7 @@ class LLMAgent(PlayerAgent):
         llm_logger: LLMLogger,
         config: GameConfig,
         game_cost_budget: GameCostBudget | None = None,
+        on_call_done: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.player_id = player_id
         self.model_info = model_info
@@ -97,6 +98,11 @@ class LLMAgent(PlayerAgent):
         self.llm_logger = llm_logger
         self.config = config
         self.game_cost_budget = game_cost_budget
+        self.on_call_done = on_call_done
+        """1コール完了ごとに呼ばれるフック（サイクル2.0新設）。引数は
+        {"player_id", "phase", "round_num", "turn", "elapsed_ms", "ok", "error_type"}
+        の辞書。試合進行の途中経過を画面に出すためだけに使う
+        （試合の判定・結果には一切影響しない。失敗しても試合を止めない）"""
 
         # DevRelay席はprovider側がANONYMIZATION_LINEを付与するため二重を避ける。
         include_anonymization = model_info.adapter_type != "devrelay_http"
@@ -126,7 +132,11 @@ class LLMAgent(PlayerAgent):
             return config.loan_min
         try:
             amount = parse_loan_amount(text)
-        except ParseError:
+        except ParseError as e:
+            self.llm_logger.log_invalid_response(
+                player_id=self.player_id, model_id=self.model_info.model_id,
+                phase="loan", round_num=0, turn=None, reason=str(e),
+            )
             return config.loan_min
         return max(config.loan_min, min(config.loan_max, amount))
 
@@ -166,6 +176,10 @@ class LLMAgent(PlayerAgent):
                 logger.warning(
                     "parse error for %s negotiation turn=%d: %s", player_state.player_id, turn, parse_error,
                 )
+                self.llm_logger.log_invalid_response(
+                    player_id=self.player_id, model_id=self.model_info.model_id,
+                    phase="negotiation", round_num=round_num, turn=turn, reason=str(parse_error),
+                )
                 prompt = base_prompt + "\n\n" + make_correction_message(parse_error)
                 continue
 
@@ -204,6 +218,10 @@ class LLMAgent(PlayerAgent):
         except (ParseError, ValueError, TypeError, ValidationError) as e:
             self.action_correction_count += 1
             logger.warning("parse error for %s commit round=%d: %s", player_state.player_id, round_num, e)
+            self.llm_logger.log_invalid_response(
+                player_id=self.player_id, model_id=self.model_info.model_id,
+                phase="commit", round_num=round_num, turn=None, reason=str(e),
+            )
             return None  # type: ignore[return-value]
 
         self.last_emotion = (strategy or {}).get("emotion") if isinstance(strategy, dict) else None
@@ -254,6 +272,12 @@ class LLMAgent(PlayerAgent):
 
         呼び出しはllm_loggerへ記録する。game_cost_budgetが注入されている場合は
         呼び出し前にworst_case_cost()で予約し、成功時に実コストで精算する。
+
+        サイクル2.0: アダプタエラー・想定外の例外は従来の警告ログ1行だけでなく
+        `llm_logger.log_failed_call()` にも記録する（時間切れ等をllm_calls.jsonl
+        から集計できるようにするため）。`on_call_done` が注入されていれば、
+        成功・失敗を問わず1コールごとに呼ぶ（試合の途中経過を画面に出す用途。
+        このフック自体の例外は握りつぶし、試合を止めない）。
         """
         self._last_call_was_budget_blocked = False
         reservation = None
@@ -265,6 +289,7 @@ class LLMAgent(PlayerAgent):
                 )
             except BudgetBlockedError:
                 self._last_call_was_budget_blocked = True
+                self._notify_call_done(phase, round_num, turn, 0.0, ok=False, error_type="budget_blocked")
                 return None, None
 
         request_options = build_json_object_request_options(
@@ -304,13 +329,46 @@ class LLMAgent(PlayerAgent):
                 system_prompt=system, user_prompt=user_message, response_text=text,
                 usage=usage, cost=cost, elapsed_ms=elapsed_ms, emotion=emotion,
             )
+            self._notify_call_done(phase, round_num, turn, elapsed_ms, ok=True, error_type=None)
             return text, usage
         except AdapterError as e:
+            elapsed_ms = (time.monotonic() - started) * 1000
+            error_type = _classify_error(e)
             logger.warning("adapter error for %s: %s", self.player_id, e)
+            self.llm_logger.log_failed_call(
+                player_id=self.player_id, model_id=self.model_info.model_id,
+                phase=phase, round_num=round_num, turn=turn,
+                system_prompt=system, user_prompt=user_message,
+                error=str(e), error_type=error_type, elapsed_ms=elapsed_ms,
+            )
+            self._notify_call_done(phase, round_num, turn, elapsed_ms, ok=False, error_type=error_type)
             return None, None
         except Exception as e:  # noqa: BLE001 — 想定外の例外も安全側へ丸める
+            elapsed_ms = (time.monotonic() - started) * 1000
             logger.warning("unexpected error in _call for %s phase=%s: %s", self.player_id, phase, e)
+            self.llm_logger.log_failed_call(
+                player_id=self.player_id, model_id=self.model_info.model_id,
+                phase=phase, round_num=round_num, turn=turn,
+                system_prompt=system, user_prompt=user_message,
+                error=str(e), error_type="other", elapsed_ms=elapsed_ms,
+            )
+            self._notify_call_done(phase, round_num, turn, elapsed_ms, ok=False, error_type="other")
             return None, None
         finally:
             if reservation is not None and self.game_cost_budget is not None and not settled:
                 self.game_cost_budget.release(reservation)
+
+    def _notify_call_done(
+        self, phase: str, round_num: int, turn: int | None, elapsed_ms: float,
+        *, ok: bool, error_type: str | None,
+    ) -> None:
+        """`on_call_done` フックを安全に呼ぶ（例外は握りつぶし、試合を止めない）"""
+        if self.on_call_done is None:
+            return
+        try:
+            self.on_call_done({
+                "player_id": self.player_id, "phase": phase, "round_num": round_num,
+                "turn": turn, "elapsed_ms": elapsed_ms, "ok": ok, "error_type": error_type,
+            })
+        except Exception:  # noqa: BLE001 — 画面表示用フックの例外で試合を止めない
+            pass
