@@ -27,7 +27,6 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from engine.config import GameConfig
 from scripts.summarize_trial import (
     short_model_label,
     summarize_contracts,
@@ -38,9 +37,10 @@ from scripts.summarize_trial import (
 from viewer.log_index import load_or_build_index
 from viewer.redact import redact_value
 
-# 本戦・Bot試合いずれも既定の参加費（§4.1/§10）で動いている前提
-# （GameConfig()はコンストラクタ引数なしなら§10の確定値を返す）。
-_ENTRY_FEE = GameConfig().entry_fee
+# サイクル4.0: engine.config.GameConfig().entry_fee への参照をやめた
+# （v0.4で参加費が100万円に変わり、v0.3の記録l12r12_2002等の資産推移の
+# 表示が狂う実害があった）。参加費は fold_assets() 内でその試合の
+# ENTRY_FEE_COLLECTEDイベントから動的に求める。
 
 # 試合一覧に出す条件（§作るもの1「席の割り当てがあるものだけ」）:
 # seat_mapの席数がこの値以上であること。Bot試合・動作確認（smoke4=4席、
@@ -155,6 +155,11 @@ def fold_assets(events: list[dict[str, Any]]) -> dict[int, dict[str, dict[str, i
     cash: dict[str, int] = defaultdict(int)
     debt: dict[str, int] = {}
     snapshots: dict[int, dict[str, dict[str, int]]] = {}
+    # v0.3の記録再生用: 参加費はConfigの既定値を参照せず、その試合の
+    # ENTRY_FEE_COLLECTED（paid+borrowed、§3.4の例外で必ず満額）から
+    # 動的に求める。イベントに一度も出ていない場合だけv0.3の既定値
+    # （10万円）にフォールバックする（v0.4の記録はサイクル4.3で対応）。
+    entry_fee_seen: int | None = None
 
     for e in events:
         t = e.get("event_type")
@@ -167,9 +172,11 @@ def fold_assets(events: list[dict[str, Any]]) -> dict[int, dict[str, dict[str, i
                 debt[pid] = amount
         elif t == "ENTRY_FEE_COLLECTED":
             cash[d["player_id"]] += -d.get("paid", 0) + d.get("borrowed", 0)
+            entry_fee_seen = d.get("paid", 0) + d.get("borrowed", 0)
         elif t == "MINORITY_RESOLVED":
+            entry_fee = entry_fee_seen if entry_fee_seen is not None else 100_000
             for pid in d.get("minority_ids", []):
-                cash[pid] += _ENTRY_FEE + d.get("payout_per_minority", 0)
+                cash[pid] += entry_fee + d.get("payout_per_minority", 0)
         elif t == "CONTRACT_PAYMENT":
             cash[d["obligor"]] -= d.get("paid", 0)
             cash[d["counterparty"]] += d.get("paid", 0)

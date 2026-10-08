@@ -1,9 +1,10 @@
 """
-抽象プレイヤーインターフェース・スタブモジュール（§7.1 Negotiation/Commit）
+抽象プレイヤーインターフェース・スタブモジュール（§7.2 Negotiation/Commit、v0.4）
 
 dangou-card `engine/negotiation.py`（B分類）の `PlayerAgent`/`StubAgent` から
 流用。`commit()` の戻り値を市場+カードの `MarketCommitAction` から単純な
-`Vote`（YES/NO）に差し替えた。
+`Vote`（YES/NO）に差し替えた。サイクル4.0で `negotiate()`/`commit()` に
+`vote_num`（投票番号、§1.1）を追加した。
 """
 
 from abc import ABC, abstractmethod
@@ -39,16 +40,18 @@ class PlayerAgent(ABC):
         self,
         player_state: PlayerState,
         round_num: int,
+        vote_num: int,
         turn: int,
         visible_state: dict,
     ) -> Action:
         """
-        Negotiationフェイズで1アクションを選択する（§7.1 Negotiation）
+        Negotiationフェイズで1アクションを選択する（§7.2 Negotiation）
 
         Args:
             player_state: 自分のプレイヤー状態
             round_num: ラウンド番号
-            turn: 現在の巡数（1〜10）
+            vote_num: 投票番号（v0.4新設、§1.1）
+            turn: 現在の巡数
             visible_state: 公開情報の辞書
 
         Returns:
@@ -61,14 +64,16 @@ class PlayerAgent(ABC):
         self,
         player_state: PlayerState,
         round_num: int,
+        vote_num: int,
         visible_state: dict,
     ) -> Vote:
         """
-        Commitフェイズで投票先を選択する（§4.1）
+        Commitフェイズで投票先を選択する（§4.2）
 
         Args:
             player_state: 自分のプレイヤー状態
             round_num: ラウンド番号
+            vote_num: 投票番号（v0.4新設、§1.1）
             visible_state: 公開情報の辞書
 
         Returns:
@@ -83,10 +88,10 @@ class PlayerAgent(ABC):
         visible_state: dict,
     ) -> None:
         """
-        ラウンド終了後の振り返り機会（既定は何もしない）
+        ラウンド終了後の振り返り機会（既定は何もしない、§9.4: 振り返りは
+        各ラウンドの終わりと試合後に行う。投票ごとには行わない）
 
-        Bot/StubAgentはオーバーライド不要。LLMAgent導入時（サイクル1.3）に
-        使う想定のフック。
+        Bot/StubAgentはオーバーライド不要。LLMAgent導入時に使う想定のフック。
 
         Args:
             player_state: 自分のプレイヤー状態
@@ -131,6 +136,7 @@ class StubAgent(PlayerAgent):
         self,
         player_state: PlayerState,
         round_num: int,
+        vote_num: int,
         turn: int,
         visible_state: dict,
     ) -> Action:
@@ -141,6 +147,7 @@ class StubAgent(PlayerAgent):
         self,
         player_state: PlayerState,
         round_num: int,
+        vote_num: int,
         visible_state: dict,
     ) -> Vote:
         """常にYESを選択"""

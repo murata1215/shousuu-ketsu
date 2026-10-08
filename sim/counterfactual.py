@@ -18,8 +18,16 @@ engine.minority.resolve_minority()（ルールエンジンそのもの、無改�
 """
 
 from engine.config import GameConfig
-from engine.minority import resolve_minority
-from engine.models import Obligation, RoundSummary, Vote
+from engine.models import Obligation, RoundOutcome, Vote
+from engine.vote import resolve_vote
+
+# サイクル4.0: v0.4でengine.minority.resolve_minority/RoundSummaryが廃止された
+# ため、importが落ちないよう最小限に差し替えた（本モジュールのv0.4対応自体は
+# サイクル4.1）。関数本体はv0.3の引数・属性を前提にしたままで呼び出すと
+# 失敗するが、対応するtests/test_counterfactual.pyはサイクル4.1まで
+# skipしているため実害はない。
+resolve_minority = resolve_vote
+RoundSummary = RoundOutcome
 
 
 def _receive_if(

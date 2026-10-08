@@ -15,5 +15,5 @@ class RandomVoteBot(BotAgent):
     def __init__(self, seed: int = 0) -> None:
         super().__init__("Random", seed=seed)
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return self.rng.choice([Vote.YES, Vote.NO])

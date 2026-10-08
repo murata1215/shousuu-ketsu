@@ -34,7 +34,7 @@ class LoanMinBot(BotAgent):
     def choose_loan(self, config: GameConfig) -> int:
         return config.loan_min
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return self.rng.choice([Vote.YES, Vote.NO])
 
 
@@ -47,7 +47,7 @@ class LoanMidHoldBot(BotAgent):
     def choose_loan(self, config: GameConfig) -> int:
         return LOAN_MID
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return self.rng.choice([Vote.YES, Vote.NO])
 
 
@@ -60,5 +60,5 @@ class LoanMaxHoldBot(BotAgent):
     def choose_loan(self, config: GameConfig) -> int:
         return config.loan_max
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return self.rng.choice([Vote.YES, Vote.NO])

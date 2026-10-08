@@ -22,7 +22,7 @@ from bots.follow_bot import FollowMajorityBot, FollowMinorityBot
 from bots.loan_bot import LoanMaxHoldBot, LoanMidHoldBot, LoanMinBot
 from bots.pair_bot import BetrayerPairBot, PairSplitBot
 from bots.random_vote_bot import RandomVoteBot
-from tests.helpers import RandomContractAgent
+from bots.random_contract_bot import RandomContractBot
 
 PLAYER_IDS: list[str] = [f"P{i:02d}" for i in range(1, 13)]
 
@@ -120,7 +120,7 @@ def _s5_loan_types(seed: int) -> dict[str, RecordingAgent]:
 def _s6_random_contracts(seed: int, config: GameConfig) -> dict[str, RecordingAgent]:
     agents: dict[str, RecordingAgent] = {}
     for pid in PLAYER_IDS:
-        bot = RandomContractAgent(pid, seed=_bot_seed(seed, pid), num_rounds=config.num_rounds)
+        bot = RandomContractBot(pid, seed=_bot_seed(seed, pid), num_rounds=config.num_rounds)
         agents[pid] = RecordingAgent(bot, "RandomContract")
     return agents
 

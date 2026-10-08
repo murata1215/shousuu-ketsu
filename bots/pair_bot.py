@@ -6,6 +6,13 @@
 相手はコンストラクタで固定（BOT_REGISTRYには登録せず、シナリオ側
 （sim/scenarios.py）がペアごとにインスタンス化する）。
 
+サイクル4.0: v0.4のPlayerAgent I/F（vote_num追加）に合わせて引数だけ
+最小修正した（import・呼び出しが失敗しないようにする範囲）。本Botの
+ロジック自体のv0.4対応（ラウンド丸ごとではなく特定の投票を対象にする等）
+はサイクル4.1（Bot検証）で行う。契約はround_num単位のままなので、
+v0.4のvalidate_terms（vote_num必須の型Bにはvote_num=None不可）には
+現状のterms組み立てでは通らない（4.1で対応）。
+
 段取り（計画§6 判断2）:
 - プレイヤーIDの小さい方が提案者、大きい方が署名者（役割は固定）。
 - 提案者はそのラウンドの最初の自分の巡で、当該ラウンド対象の型B義務
@@ -44,7 +51,7 @@ class PairSplitBot(BotAgent):
         return {small: Vote.NO, large: Vote.YES}
 
     def negotiate(
-        self, player_state: PlayerState, round_num: int, turn: int, visible_state: dict,
+        self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
     ) -> "ContractProposeAction | ContractSignAction | PassAction":
         small, large = self._roles()
 
@@ -80,7 +87,7 @@ class PairSplitBot(BotAgent):
                     return ContractSignAction(player_id=self.player_id, contract_id=c["contract_id"])
         return PassAction(player_id=self.player_id)
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         """約束どおりに投票する（必ず守る）"""
         return self._sides(round_num)[self.player_id]
 
@@ -97,7 +104,7 @@ class BetrayerPairBot(PairSplitBot):
         self.bot_type = "BetrayerPair"
         self.betray_prob = betray_prob
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         obligated = self._sides(round_num)[self.player_id]
         if self.rng.random() < self.betray_prob:
             return Vote.NO if obligated == Vote.YES else Vote.YES

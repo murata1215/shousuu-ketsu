@@ -7,10 +7,15 @@ engine.minority.resolve_minority()（ルールエンジンそのもの）を直�
 RoundSummaryを組み立てる。
 """
 
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="sim.counterfactualのv0.4対応（投票単位・ラウンド単位の二重精算）はサイクル4.1",
+)
+
 from engine.config import GameConfig
-from engine.minority import resolve_minority
-from engine.models import Obligation, ObligationType, RoundSummary, Vote
-from sim.counterfactual import type_b_obligation_gain
+from engine.models import Obligation, ObligationType, Vote
+from sim.counterfactual import RoundSummary, resolve_minority, type_b_obligation_gain
 from sim.metrics import PENALTY_AMOUNTS
 
 

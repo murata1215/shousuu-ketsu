@@ -71,6 +71,8 @@ class EventLogger:
         phase: str,
         data: dict[str, Any] | None = None,
         step: int | None = None,
+        vote_num: int | None = None,
+        visibility: str = "spectator",
     ) -> GameEvent:
         """
         イベントを記録する
@@ -78,11 +80,13 @@ class EventLogger:
         メモリに保持し、逐次追記モード時はファイルにも即時書き込む。
 
         Args:
-            event_type: イベント種別（例: "GAME_START", "MATCH_RESOLVED"等）
+            event_type: イベント種別（例: "GAME_START", "VOTE_RESOLVED"等）
             round_num: ラウンド番号（0=ゲーム開始前）
             phase: フェイズ名
             data: イベント固有データ
-            step: ターン処理内のStep番号（§5.1: 1-8）
+            step: Settlement内のStep番号（§7.3/§7.4）
+            vote_num: 投票番号（1〜6。v0.4新設、§1.1）
+            visibility: 公開区分（§8）。既定はspectator（安全側）
 
         Returns:
             記録されたGameEvent
@@ -91,8 +95,10 @@ class EventLogger:
             event_type=event_type,
             timestamp=self._now(),
             round_num=round_num,
+            vote_num=vote_num,
             phase=phase,
             step=step,
+            visibility=visibility,  # type: ignore[arg-type]
             data=data or {},
         )
         with self._lock:

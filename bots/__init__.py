@@ -11,6 +11,13 @@ LLMを使わない決定論的Botを提供する。全BotはPlayerAgentを継承
 bots/pair_bot.py）は相手IDをコンストラクタで固定する必要があるため、
 BOT_REGISTRY（引数なしでseedだけ渡して作れるBot）には登録せず、
 sim/scenarios.py がペアごとに直接インスタンス化する。
+
+サイクル4.0（v0.4）で RandomContractBot（bots/random_contract_bot.py）を
+追加した。player_id を必須引数に取るため同じ理由でBOT_REGISTRYには
+登録せず、scripts/dry_run.py・tests/test_invariants.py が直接
+インスタンス化する（v0.3までtests/helpers.pyにあった
+RandomContractAgentの後継。本番コードからテストコードへの逆依存を
+解消するためbots/へ移した）。
 """
 
 from bots.always_no_bot import AlwaysNoBot

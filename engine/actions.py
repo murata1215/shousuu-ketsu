@@ -47,6 +47,7 @@ def validate_action(
     players: dict[str, PlayerState],
     *,
     round_num: int = 1,
+    vote_num: int = 1,
     contracts: list[Contract] | None = None,
 ) -> ActionResult:
     """
@@ -58,6 +59,8 @@ def validate_action(
         config: ゲーム設定
         players: 全プレイヤーの状態辞書
         round_num: 現在のラウンド（contract_proposeのround_num範囲検証に使う）
+        vote_num: 現在の投票番号（contract_proposeのvote_num範囲検証に使う、
+            v0.4新設、§9.3）
         contracts: 全契約リスト（contract_signの対象検索に使う。契約を扱わない
             アクションの検証には不要なためキーワード専用・省略可）
 
@@ -120,7 +123,8 @@ def validate_action(
 
         parties = {action.player_id, *action.with_players}
         error = validate_terms(
-            action.terms, parties, set(players.keys()), round_num, config.num_rounds,
+            action.terms, parties, set(players.keys()),
+            round_num, vote_num, config.num_rounds,
         )
         if error is not None:
             return ActionResult(False, error)

@@ -41,7 +41,7 @@ class BotAgent(PlayerAgent):
         return config.loan_min
 
     def negotiate(
-        self, player_state: PlayerState, round_num: int, turn: int, visible_state: dict,
+        self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
     ) -> Action:
         """既定: 常にpass（繰上げ返済はしない。サイクル1.2で変更）"""
         return PassAction(player_id=player_state.player_id)

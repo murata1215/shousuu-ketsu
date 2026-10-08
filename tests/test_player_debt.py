@@ -1,5 +1,9 @@
 """
-借金・現金操作のテスト（§3、仕様書§12.3 #7・#10・#15・#16・#26・#27を含む）
+借金・現金操作のテスト（§3、仕様書v0.4 §12.3 #16・#17・#21・#22・#23を含む）
+
+サイクル4.0でv0.3からv0.4へ更新。計算ロジック（pay_or_borrow/repay/
+remaining_credit）自体は無改修で、参加費10万→100万（§4.1/§10）に伴う
+数値の差し替えと、仕様書v0.4 §12.3の番号への振り直しを行った。
 """
 
 from engine.config import GameConfig
@@ -12,28 +16,36 @@ def _player(cash: int, debt_pre: int = 0, debt_post: int = 0) -> PlayerState:
     return PlayerState(player_id="P01", cash=cash, debt_pre=debt_pre, debt_post=debt_post, initial_loan=1_200_000)
 
 
-def test_acceptance_7_cash_zero_entry_fee_becomes_post_debt() -> None:
-    """#7: 現金0で投票 → 参加費10万が開始後の借金（3%）になる"""
+def test_acceptance_16_cash_zero_entry_fee_becomes_post_debt() -> None:
+    """#16: 現金0でラウンドを開始 → 参加費100万が開始後の借金（15%）になる。現金は0"""
     config = GameConfig.default_12()
     p = _player(cash=0)
     result = player_ops.pay_or_borrow(p, config.entry_fee, config, cap_exempt=True)
-    assert result.paid == 100_000
-    assert result.borrowed == 100_000
+    assert result.paid == 1_000_000
+    assert result.borrowed == 1_000_000
     assert result.shortfall == 0
     assert result.player.cash == 0
-    assert result.player.debt_post == 100_000
+    assert result.player.debt_post == 1_000_000
 
 
-def test_acceptance_10_entry_fee_exempt_from_cap() -> None:
-    """#10: 借金残高1000万・現金0で投票 → 参加費は貸す（上限の例外）"""
+def test_acceptance_17_entry_fee_and_extension_fee_exempt_from_cap() -> None:
+    """#17: 借金残高1000万・現金0でラウンドを開始し、V1がやり直し
+    → 参加費100万も延長料10万も貸す（上限の例外）"""
     config = GameConfig.default_12()
     p = _player(cash=0, debt_pre=10_000_000, debt_post=0)
     assert player_ops.remaining_credit(p, config) == 0
 
-    result = player_ops.pay_or_borrow(p, config.entry_fee, config, cap_exempt=True)
-    assert result.shortfall == 0
-    assert result.borrowed == 100_000
-    assert result.player.total_debt == 10_100_000
+    entry_result = player_ops.pay_or_borrow(p, config.entry_fee, config, cap_exempt=True)
+    assert entry_result.shortfall == 0
+    assert entry_result.borrowed == 1_000_000
+    assert entry_result.player.total_debt == 11_000_000
+
+    extension_result = player_ops.pay_or_borrow(
+        entry_result.player, config.extension_fee, config, cap_exempt=True,
+    )
+    assert extension_result.shortfall == 0
+    assert extension_result.borrowed == 100_000
+    assert extension_result.player.total_debt == 11_100_000
 
 
 def test_pay_or_borrow_without_exemption_respects_cap() -> None:
@@ -50,10 +62,9 @@ def test_pay_or_borrow_without_exemption_respects_cap() -> None:
     assert result.player.debt_post == 300_000
 
 
-def test_acceptance_15_repay_only_post_debt() -> None:
-    """#15（v0.3で改訂）: 開始前の借金120万と開始後の借金50万がある状態で
-    60万を返済 → 開始後の50万だけ返済される。10万は手元に残り、
-    開始前の借金は変わらない"""
+def test_acceptance_21_repay_only_post_debt() -> None:
+    """#21: 開始前の借金120万と開始後の借金50万がある状態で60万を返済
+    → 開始後の50万だけ返済される。10万は手元に残り、開始前の借金は変わらない"""
     p = _player(cash=1_000_000, debt_pre=1_200_000, debt_post=500_000)
     new_p, actual = player_ops.repay(p, 600_000)
     assert actual == 500_000
@@ -63,7 +74,7 @@ def test_acceptance_15_repay_only_post_debt() -> None:
 
 
 def test_repay_clamped_to_post_debt() -> None:
-    """返済額は min(指定額, 現金, 開始後の借金残高) にクランプされる（§3.5 v0.3）"""
+    """返済額は min(指定額, 現金, 開始後の借金残高) にクランプされる（§3.5）"""
     p = _player(cash=5_000_000, debt_pre=200_000, debt_post=100_000)
     new_p, actual = player_ops.repay(p, 1_000_000)
     assert actual == 100_000
@@ -71,8 +82,8 @@ def test_repay_clamped_to_post_debt() -> None:
     assert new_p.debt_post == 0
 
 
-def test_acceptance_26_repay_without_post_debt_is_rejected() -> None:
-    """#26: 開始後の借金が0の状態で返済を指定（開始前の借金は残っている）
+def test_acceptance_22_repay_without_post_debt_is_rejected() -> None:
+    """#22: 開始後の借金が0の状態で返済を指定（開始前の借金は残っている）
     → 不成立。開始前の借金は減らない"""
     config = GameConfig.default_12()
     p = _player(cash=1_000_000, debt_pre=5_000_000, debt_post=0)
@@ -87,9 +98,11 @@ def test_acceptance_26_repay_without_post_debt_is_rejected() -> None:
     assert new_p.cash == 1_000_000
 
 
-def test_acceptance_27_repay_rejected_then_interest_applies_to_max_loan() -> None:
-    """#27: 1000万を借りた人が、R1の交渉で返済を指定 → 不成立。
-    R1のFinanceで1000万に利息がつく"""
+def test_repay_rejected_then_interest_applies_to_max_loan() -> None:
+    """1000万を借りた人が、R1の交渉で返済を指定 → 不成立。
+    R1のFinanceで1000万に利息（5%）がつく（v0.3 §12.3 #27相当。v0.4では
+    仕様書50件に含まれないが、返済不成立のまま利息が計上される性質は
+    変わらないため回帰テストとして残す）"""
     config = GameConfig.default_12()
     p = PlayerState(
         player_id="P01", cash=10_000_000, debt_pre=10_000_000, debt_post=0,
@@ -101,13 +114,13 @@ def test_acceptance_27_repay_rejected_then_interest_applies_to_max_loan() -> Non
 
     # Finance（apply_interest）は不成立のまま進み、開始前の借金に利息がつく
     new_p, interest_pre, interest_post = player_ops.apply_interest(p, config)
-    assert interest_pre == 150_000  # 10,000,000 * 1.5% （割り切れるため切り上げ不要）
+    assert interest_pre == 500_000  # 10,000,000 * 5% （割り切れるため切り上げ不要）
     assert interest_post == 0
-    assert new_p.debt_pre == 10_150_000
+    assert new_p.debt_pre == 10_500_000
 
 
-def test_acceptance_16_transfer_exceeding_cash_is_rejected() -> None:
-    """#16: 手持ち20万で50万を送金 → 不成立"""
+def test_acceptance_23_transfer_exceeding_cash_is_rejected() -> None:
+    """#23: 手持ち20万で50万を送金 → 不成立"""
     config = GameConfig.default_12()
     me = _player(cash=200_000)
     other = _player(cash=0)

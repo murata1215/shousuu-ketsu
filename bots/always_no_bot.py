@@ -14,5 +14,5 @@ class AlwaysNoBot(BotAgent):
     def __init__(self, seed: int = 0) -> None:
         super().__init__("AlwaysNo", seed=seed)
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return Vote.NO
