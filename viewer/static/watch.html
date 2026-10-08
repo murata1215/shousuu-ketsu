@@ -97,8 +97,12 @@ function guessVendor(modelName) {
   return '';
 }
 function emotionDisplay(emotion, vendor) {
-  const en = EMOTION_EN[emotion] || 'neutral';
   const emoji = EMOTION_EMOJI[emotion] || '😐';
+  // vendor不明（名簿未取得など）のときは画像を試さず絵文字にする保険
+  // （場面リンク直開き時の404対策。読み込み順の修正[selectTabのskipLoad]が本筋、
+  // これは二重の保険。サイクル3.1）。
+  if (!vendor) return `<span class="emotion-img emotion-emoji">${emoji}</span>`;
+  const en = EMOTION_EN[emotion] || 'neutral';
   const vendorSrc = `static/emotions/${vendor}_${en}.png`;
   const commonSrc = `static/emotions/${en}.png`;
   if (en === 'neutral') {
@@ -117,6 +121,13 @@ function modelLabelOf(pid) {
   return r ? r.model_label : '';
 }
 function vendorOfSeat(pid) { return guessVendor(modelLabelOf(pid)); }
+// 席の表示にモデル名を添える（例: P08 claude-opus-5）。戻り値は未エスケープなので
+// 呼び出し側でescapeHtmlすること（本ファイルの他のヘルパーと同じ約束）。
+function seatLabel(pid) {
+  if (!pid) return '';
+  const model = modelLabelOf(pid);
+  return model ? `${pid} ${model}` : pid;
+}
 
 // ==== 場面リンク（dangou-card viewer/static/index.htmlの該当関数を少数決向けに簡略移植） ====
 function parseSceneParams(search) {
@@ -200,11 +211,15 @@ function highlightAndScroll(el) {
 window.copySceneLink = copySceneLink; // インラインonclickから呼ぶ
 
 // ==== タブ切替 ====
-function selectTab(tab, { skipHistory } = {}) {
+function selectTab(tab, { skipHistory, skipLoad } = {}) {
   currentTab = tab;
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab}`));
   if (!skipHistory) syncAddressBar();
+  // skipLoad: switchGame()が席一覧(overviewData)を読み込む前にここが走ると、
+  // vendorOfSeat()が空文字になり感情画像が404する（場面リンク直開き時の事故。
+  // サイクル3.1）。switchGame側で名簿取得後に明示的にloadXxxを呼ぶのでここでは読まない。
+  if (skipLoad) return;
   if (tab === 'overview') loadOverview();
   else if (tab === 'round') loadRound(currentRound);
   else if (tab === 'contracts') loadContracts();
@@ -239,8 +254,8 @@ async function switchGame(gameId, scene) {
   currentGame = gameId;
   currentRound = (scene && scene.round) || 1;
   const tab = (scene && scene.tab) || 'overview';
-  selectTab(tab, { skipHistory: true });
-  await loadOverview(); // 席一覧・最大ラウンドを得るため概要を先に読む
+  selectTab(tab, { skipHistory: true, skipLoad: true });
+  await loadOverview(); // 席一覧・最大ラウンドを得るため概要を先に読む（タブがoverviewならこれで足りる）
   if (tab === 'round') await loadRound(currentRound, scene);
   else if (tab === 'contracts') await loadContracts(scene);
   else if (tab === 'seat') await setupSeatTab(scene);
@@ -314,8 +329,8 @@ async function loadOverview() {
     return `<tr class="${isTie ? 'tie-row' : ''}">
       <td>R${r.round_num}</td>
       <td>${escapeHtml(r.question || '—')}</td>
-      <td>${splitBar(r.yes_count, r.no_count)} ${roundLabel(r.yes_count, r.no_count)}</td>
-      <td>${isTie ? '少数派なし（持ち越し）' : escapeHtml(r.minority_side) + '（' + r.minority_ids.map(escapeHtml).join(', ') + '）'}</td>
+      <td>${splitBar(r.yes_count, r.no_count)} ${roundLabel(r.yes_count, r.no_count)}${voteLegend(r.votes)}</td>
+      <td>${isTie ? '少数派なし（持ち越し）' : escapeHtml(r.minority_side) + '（' + r.minority_ids.map(p => escapeHtml(seatLabel(p))).join(', ') + '）'}</td>
       <td>${isTie ? '—' : yen(r.payout_per_minority)}</td>
       <td>${yen(r.carryover_after)}</td>
       <td><a href="#" onclick="event.preventDefault(); goToRound(${r.round_num});">詳細</a></td>
@@ -346,13 +361,13 @@ function fillRoundSeatFilter() {
   const sel = document.getElementById('round-seat-filter');
   const cur = sel.value;
   sel.innerHTML = '<option value="">（全員）</option>' + seatIds.map(pid =>
-    `<option value="${escapeHtml(pid)}">${escapeHtml(pid)}（${escapeHtml(modelLabelOf(pid))}）</option>`).join('');
+    `<option value="${escapeHtml(pid)}">${escapeHtml(seatLabel(pid))}</option>`).join('');
   if (seatIds.includes(cur)) sel.value = cur;
 }
 function fillSeatSelect() {
   const sel = document.getElementById('seat-select');
   sel.innerHTML = '<option value="">（席を選択）</option>' + seatIds.map(pid =>
-    `<option value="${escapeHtml(pid)}">${escapeHtml(pid)}（${escapeHtml(modelLabelOf(pid))}）</option>`).join('');
+    `<option value="${escapeHtml(pid)}">${escapeHtml(seatLabel(pid))}</option>`).join('');
 }
 
 // ==== ラウンドタブ ====
@@ -368,8 +383,76 @@ function matchesSeatFilter(item, pid) {
   return false;
 }
 
+// 署名(contract_sign)の直後に同じ契約の成立(contract_established)が来る組は必ず
+// 隣接する（engine/game.py: 最後の署名と同じ処理内でCONTRACT_SIGNED→CONTRACT_ESTABLISHEDを
+// 連続してログするため）。これを1項目に統合し「同じ署名が2行出る」のを防ぐ
+// （サイクル3.1、フィルタ前に統合するのは絞り込みで片方だけ消える事故を避けるため）。
+function mergeSignEstablished(items) {
+  const out = [];
+  for (let i = 0; i < items.length; i++) {
+    const cur = items[i];
+    const next = items[i + 1];
+    if (cur.kind === 'contract_sign' && next && next.kind === 'contract_established'
+        && next.contract_id === cur.contract_id) {
+      out.push({ ...next, kind: 'contract_sign_established', signer: cur.signer, sign_turn: cur.turn });
+      i++; // nextを消費済みとしてスキップ
+      continue;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
 const ACTION_TAG = { dm: 'tag-dm', broadcast: 'tag-broadcast', pass: 'tag-pass', contract_sign: 'tag-contract' };
 const ACTION_LABEL = { dm: 'DM', broadcast: '全体発言', pass: 'パス', contract_sign: '署名' };
+
+// 事故種別・義務の型の日本語ラベル（§作るもの、サイクル3.1で英語表示を直す）
+const ACCIDENT_LABEL = { timeout: '時間切れ', server_error: 'サーバーエラー', invalid_response: '読み取りエラー' };
+function accidentLabel(kind) { return ACCIDENT_LABEL[kind] || kind; }
+const OB_TYPE_LABEL = { type_a_payment: '型A', type_b_vote: '型B', type_c_conditional: '型C' };
+
+// engine/actions.pyのActionResult(False, ...)全文を日本語化する（サイクル3.1）。
+// 未知の文はそのまま表示する（情報を落とさない）。CLAUDE.md「過去の落とし穴」④
+// （同型バグの片側だけ直す事故）対策として、tests/test_viewer_frontend.pyで
+// engine側の全文がここに存在することを機械的に検査する。
+const REASON_JA = [
+  [/^Cannot DM self$/, () => '自分へのDMは禁止'],
+  [/^Cannot transfer to self$/, () => '自分への振込は禁止'],
+  [/^Insufficient cash for transfer$/, () => '振込に必要な現金が不足'],
+  [/^No post-start debt to repay$/, () => '返済対象の借金（開始後分）が無い'],
+  [/^Repay amount must be positive$/, () => '返済額は正の数で指定すること'],
+  [/^Transfer amount must be positive$/, () => '振込額は正の数で指定すること'],
+  [/^with_players must not be empty$/, () => '契約の相手が指定されていない'],
+  [/^with_players must not contain duplicates$/, () => '契約の相手に重複がある'],
+  [/^with_players must not include the proposer$/, () => '契約の相手に提案者自身が含まれている'],
+  [/^Contract (.+) is not awaiting signatures$/, (m) => `契約${m[1]}は署名待ちではない`],
+  [/^Contract (.+) not found$/, (m) => `契約${m[1]}が見つからない`],
+  [/^Unknown action type (.+)$/, (m) => `未知の行動種別: ${m[1]}`],
+  [/^Unknown counterparty (.+)$/, (m) => `未知の相手: ${m[1]}`],
+  [/^Unknown target (.+)$/, (m) => `未知の宛先: ${m[1]}`],
+  [/^You already signed (.+)$/, (m) => `契約${m[1]}には署名済み`],
+  [/^You are not a party of (.+)$/, (m) => `契約${m[1]}の当事者ではない`],
+];
+function reasonJa(reason) {
+  if (!reason) return '';
+  for (const [re, fn] of REASON_JA) {
+    const m = reason.match(re);
+    if (m) return fn(m);
+  }
+  return reason;
+}
+
+// 票の帯の凡例: YES/NOの色見本・人数・各側の席（サイクル3.1、項目2）
+function voteLegend(votes) {
+  const entries = Object.entries(votes || {});
+  const yesIds = entries.filter(([, v]) => v === 'YES').map(([pid]) => pid);
+  const noIds = entries.filter(([, v]) => v === 'NO').map(([pid]) => pid);
+  const seatList = (ids) => ids.map(p => escapeHtml(seatLabel(p))).join('、') || '—';
+  return `<div class="vote-legend">
+    <span class="vote-sw yes"></span>YES ${yesIds.length}人（${seatList(yesIds)}）
+    <span class="vote-sw no"></span>NO ${noIds.length}人（${seatList(noIds)}）
+  </div>`;
+}
 
 function renderTimelineItem(item, idx) {
   const scene = { game: currentGame, tab: 'round', round: currentRound };
@@ -378,11 +461,11 @@ function renderTimelineItem(item, idx) {
       const vendor = vendorOfSeat(item.player_id);
       const lead = item.memo && item.memo.emotion ? emotionLead(item.memo.emotion, vendor) : '';
       let body;
-      if (item.action === 'dm') body = `<b>${escapeHtml(item.player_id)}</b> → <b>${escapeHtml(item.to)}</b>: ${escapeHtml(item.message || '（本文なし）')}`;
-      else if (item.action === 'broadcast') body = `<b>${escapeHtml(item.player_id)}</b>（全体）: ${escapeHtml(item.message || '（本文なし）')}`;
-      else if (item.action === 'pass') body = `<b>${escapeHtml(item.player_id)}</b> パス`;
-      else if (item.action === 'contract_sign') body = `<b>${escapeHtml(item.player_id)}</b> 署名 ${item.success ? '成立' : `失敗（${escapeHtml(item.reason || '')}）`}`;
-      else body = `<b>${escapeHtml(item.player_id)}</b> ${escapeHtml(item.action)}`;
+      if (item.action === 'dm') body = `<b>${escapeHtml(seatLabel(item.player_id))}</b> → <b>${escapeHtml(seatLabel(item.to))}</b>: ${escapeHtml(item.message || '（本文なし）')}`;
+      else if (item.action === 'broadcast') body = `<b>${escapeHtml(seatLabel(item.player_id))}</b>（全体）: ${escapeHtml(item.message || '（本文なし）')}`;
+      else if (item.action === 'pass') body = `<b>${escapeHtml(seatLabel(item.player_id))}</b> パス`;
+      else if (item.action === 'contract_sign') body = `<b>${escapeHtml(seatLabel(item.player_id))}</b> 署名 ${item.success ? '成立' : `失敗（${escapeHtml(reasonJa(item.reason))}）`}`;
+      else body = `<b>${escapeHtml(seatLabel(item.player_id))}</b> ${escapeHtml(item.action)}`;
       const tag = ACTION_TAG[item.action] || 'tag-pass';
       const memoBlock = item.memo ? `<details class="tl-memo"><summary>内心メモ</summary><div class="tl-memo-body">
           ${item.memo.vote_plan ? `予定票: ${escapeHtml(item.memo.vote_plan)}<br>` : ''}
@@ -397,26 +480,42 @@ function renderTimelineItem(item, idx) {
         ${memoBlock}
       </div>`;
     }
-    case 'contract_propose':
+    case 'contract_propose': {
+      const obList = (item.obligations || []).map(ob => `<li>${fmtObligation(ob)}</li>`).join('');
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
         <span class="tl-turn">T${item.turn}</span><span class="tl-kind-tag tag-contract">契約提案</span>
-        ${escapeHtml(item.contract_id)}（${(item.parties || []).map(escapeHtml).join(', ')}）
+        ${escapeHtml(item.contract_id)}（${(item.parties || []).map(p => escapeHtml(seatLabel(p))).join(', ')}）
         <button class="scene-copy-btn" onclick="copySceneLink({game: currentGame, tab: 'round', round: currentRound, contract: '${escapeHtml(item.contract_id)}'})" title="リンクをコピー">🔗</button>
+        ${obList ? `<ul class="ob-list">${obList}</ul>` : ''}
       </div>`;
+    }
+    case 'contract_sign_established': {
+      const obList = (item.obligations || []).map(ob => `<li>${fmtObligation(ob)}</li>`).join('');
+      return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
+        <span class="tl-turn">T${item.sign_turn}</span><span class="tl-kind-tag tag-contract">署名・成立</span>
+        ${escapeHtml(seatLabel(item.signer))} が ${escapeHtml(item.contract_id)} に署名 → 成立（成立順 ${item.contract_seq}）
+        ${obList ? `<ul class="ob-list">${obList}</ul>` : ''}
+      </div>`;
+    }
     case 'contract_sign':
+      // 最後の署名ではない場合（多者間契約でまだ成立しない）はここに残る
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
         <span class="tl-turn">T${item.turn}</span><span class="tl-kind-tag tag-contract">署名</span>
-        ${escapeHtml(item.signer)} が ${escapeHtml(item.contract_id)} に署名
+        ${escapeHtml(seatLabel(item.signer))} が ${escapeHtml(item.contract_id)} に署名
       </div>`;
-    case 'contract_established':
+    case 'contract_established': {
+      // 通常はcontract_signと統合されるが、対になる署名が同ラウンドに無い場合の保険
+      const obList = (item.obligations || []).map(ob => `<li>${fmtObligation(ob)}</li>`).join('');
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
         <span class="tl-kind-tag tag-contract">契約成立</span>
         ${escapeHtml(item.contract_id)}（成立順 ${item.contract_seq}）
+        ${obList ? `<ul class="ob-list">${obList}</ul>` : ''}
       </div>`;
+    }
     case 'contract_expired':
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
         <span class="tl-kind-tag tag-pass">期限切れ</span>
-        ${escapeHtml(item.contract_id)}（署名済み: ${(item.signed_by || []).map(escapeHtml).join(', ')}）
+        ${escapeHtml(item.contract_id)}（署名済み: ${(item.signed_by || []).map(p => escapeHtml(seatLabel(p))).join(', ')}）
       </div>`;
     case 'vote_result': {
       const yesCount = Object.values(item.votes || {}).filter(v => v === 'YES').length;
@@ -425,7 +524,8 @@ function renderTimelineItem(item, idx) {
       return `<div class="tl-item" data-phase="vote">
         <span class="tl-kind-tag tag-vote">投票公開</span>
         ${splitBar(yesCount, noCount)} ${roundLabel(yesCount, noCount)}
-        ${isTie ? '少数派なし（持ち越し）' : `少数派: ${escapeHtml(item.minority_side)}（${(item.minority_ids||[]).map(escapeHtml).join(', ')}）配当/人 ${yen(item.payout_per_minority)}`}
+        ${voteLegend(item.votes)}
+        ${isTie ? '少数派なし（持ち越し）' : `少数派: ${escapeHtml(item.minority_side)}（${(item.minority_ids||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}）配当/人 ${yen(item.payout_per_minority)}`}
         ${item.carryover_after != null ? `持ち越し(次): ${yen(item.carryover_after)}` : ''}
         <button class="scene-copy-btn" onclick="copySceneLink({game: currentGame, tab: 'round', round: currentRound, phase: 'vote'})" title="リンクをコピー">🔗</button>
       </div>`;
@@ -435,30 +535,30 @@ function renderTimelineItem(item, idx) {
     case 'contract_payment':
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}">
         <span class="tl-kind-tag tag-pay">契約決済</span>
-        ${escapeHtml(item.contract_id)}（${escapeHtml(item.ob_type)}）: ${escapeHtml(item.obligor)} → ${escapeHtml(item.counterparty)}
+        ${escapeHtml(item.contract_id)}（${OB_TYPE_LABEL[item.ob_type] || escapeHtml(item.ob_type)}）: ${escapeHtml(seatLabel(item.obligor))} → ${escapeHtml(seatLabel(item.counterparty))}
         約束 ${yen(item.promised)} / 実払 <span class="outcome-paid">${yen(item.paid)}</span>
       </div>`;
     case 'interest':
       if (!item.interest_pre && !item.interest_post && !item.new_debt_pre && !item.new_debt_post) return '';
       return `<div class="tl-item">
         <span class="tl-kind-tag tag-pay">利息</span>
-        ${escapeHtml(item.player_id)}: 1.5%分利息 ${yen(item.interest_pre)} / 3%分利息 ${yen(item.interest_post)} /
+        ${escapeHtml(seatLabel(item.player_id))}: 1.5%分利息 ${yen(item.interest_pre)} / 3%分利息 ${yen(item.interest_post)} /
         残債務 ${yen((item.new_debt_pre||0) + (item.new_debt_post||0))}
       </div>`;
     case 'accident':
-      return `<div class="tl-item"><span class="accident-badge">自動代行</span>${escapeHtml(item.player_id)} → ${escapeHtml(item.vote)}（投票できず代行）</div>`;
+      return `<div class="tl-item"><span class="accident-badge">自動代行</span>${escapeHtml(seatLabel(item.player_id))} → ${escapeHtml(item.vote)}（投票できず代行）</div>`;
     case 'type_b_violation':
-      return `<div class="tl-item"><span class="accident-badge">型B違反</span>${(item.player_ids||[]).map(escapeHtml).join(', ')}</div>`;
+      return `<div class="tl-item"><span class="accident-badge">型B違反</span>${(item.player_ids||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}</div>`;
     case 'payment_shortfall':
-      return `<div class="tl-item"><span class="accident-badge">支払いきれず</span>${(item.player_ids||[]).map(escapeHtml).join(', ')}</div>`;
+      return `<div class="tl-item"><span class="accident-badge">支払いきれず</span>${(item.player_ids||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}</div>`;
     case 'commit':
-      return `<div class="tl-item" data-phase="commit"><span class="tl-kind-tag tag-vote">投票</span>${escapeHtml(item.player_id)}: ${escapeHtml(item.vote)}（秘密、締切前は非公開）</div>`;
+      return `<div class="tl-item" data-phase="commit"><span class="tl-kind-tag tag-vote">投票</span>${escapeHtml(seatLabel(item.player_id))}: ${escapeHtml(item.vote)}（秘密、締切前は非公開）</div>`;
     case 'entry_fee':
-      return `<div class="tl-item"><span class="tl-kind-tag tag-pay">参加費</span>${escapeHtml(item.player_id)}: ${yen(item.paid)}${item.borrowed ? `（借入 ${yen(item.borrowed)}）` : ''}</div>`;
+      return `<div class="tl-item"><span class="tl-kind-tag tag-pay">参加費</span>${escapeHtml(seatLabel(item.player_id))}: ${yen(item.paid)}${item.borrowed ? `（借入 ${yen(item.borrowed)}）` : ''}</div>`;
     case 'rank_notified':
       return '';
     case 'rank_published':
-      return `<div class="tl-item"><span class="tl-kind-tag tag-vote">順位公開</span>${Object.entries(item.ranks||{}).map(([pid, r]) => `${escapeHtml(pid)}:${r}`).join(' ')}</div>`;
+      return `<div class="tl-item"><span class="tl-kind-tag tag-vote">順位公開</span>${Object.entries(item.ranks||{}).map(([pid, r]) => `${escapeHtml(seatLabel(pid))}:${r}`).join(' ')}</div>`;
     default:
       return '';
   }
@@ -480,15 +580,15 @@ async function loadRound(rn, scene) {
   document.getElementById('round-label').textContent = `R${data.round_num} / ${data.max_round}`;
 
   const seatFilter = (scene && scene.seat) || document.getElementById('round-seat-filter').value;
-  const items = data.timeline
+  const items = mergeSignEstablished(data.timeline)
     .filter(it => matchesSeatFilter(it, seatFilter))
     .map(renderTimelineItem).filter(Boolean).join('');
 
   const accidentBadges = data.accidents.map(a =>
-    `<span class="accident-badge">${escapeHtml(a.kind)}: ${escapeHtml(a.player_id)}${a.reason ? '（' + escapeHtml(a.reason) + '）' : ''}</span>`).join(' ');
+    `<span class="accident-badge">${escapeHtml(accidentLabel(a.kind))}: ${escapeHtml(seatLabel(a.player_id))}${a.reason ? '（' + escapeHtml(a.reason) + '）' : ''}</span>`).join(' ');
 
   const memos = Object.entries(data.round_reflections || {}).map(([pid, memo]) =>
-    `<details class="tl-memo"><summary>${escapeHtml(pid)}の振り返り</summary><div class="tl-memo-body">${escapeHtml(memo)}</div></details>`).join('');
+    `<details class="tl-memo"><summary>${escapeHtml(seatLabel(pid))}の振り返り</summary><div class="tl-memo-body">${escapeHtml(memo)}</div></details>`).join('');
 
   body.innerHTML = `
     <p><b>質問:</b> ${escapeHtml(data.question || '—')} ／ 持ち越し: ${yen(data.carryover_before)}</p>
@@ -515,8 +615,8 @@ document.getElementById('round-seat-filter').addEventListener('change', () => { 
 
 // ==== 契約タブ ====
 function fmtObligation(ob) {
-  const obligor = escapeHtml(ob.obligor || '?');
-  const cp = escapeHtml(ob.counterparty || '?');
+  const obligor = escapeHtml(ob.obligor ? seatLabel(ob.obligor) : '?');
+  const cp = escapeHtml(ob.counterparty ? seatLabel(ob.counterparty) : '?');
   const d = ob.details || {};
   const r = Number.isInteger(ob.round_num) ? ` <span class="split-label">R${ob.round_num}</span>` : '';
   if (ob.ob_type === 'type_a_payment') {
@@ -529,7 +629,7 @@ function fmtObligation(ob) {
     const cond = d.condition || {};
     let condText;
     if (d.condition_type === 'minority_side') condText = `少数派が${escapeHtml(cond.side)}になる`;
-    else if (d.condition_type === 'in_minority') condText = `${escapeHtml(cond.target_player)}が少数派に入る`;
+    else if (d.condition_type === 'in_minority') condText = `${escapeHtml(seatLabel(cond.target_player))}が少数派に入る`;
     else condText = escapeHtml(d.condition_type || '?');
     return `<span class="ob-tag ob-c">型C</span> <b>${obligor}</b> は <b>${cp}</b> に ${yen(d.amount)} を支払う（条件: ${condText}）${r}`;
   }
@@ -554,14 +654,14 @@ async function loadContracts(scene) {
 
   const established = data.established.map(c => `
     <div class="contract-block" data-contract="${escapeHtml(c.contract_id)}">
-      <b>成立順 ${c.contract_seq}</b> — ${escapeHtml(c.contract_id)}（R${c.round_established}成立、提案: ${escapeHtml(c.proposer)}、当事者: ${(c.parties||[]).map(escapeHtml).join(', ')}）
+      <b>成立順 ${c.contract_seq}</b> — ${escapeHtml(c.contract_id)}（R${c.round_established}成立、提案: ${escapeHtml(seatLabel(c.proposer))}、当事者: ${(c.parties||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}）
       <button class="scene-copy-btn" onclick="copySceneLink({game: currentGame, tab: 'contracts', contract: '${escapeHtml(c.contract_id)}'})" title="リンクをコピー">🔗</button>
       <ul>${c.obligations.map(ob => `<li>${fmtObligation(ob)} — <span class="${outcomeClass(ob.outcome)}">${escapeHtml(ob.outcome)}</span></li>`).join('')}</ul>
     </div>`).join('');
 
   const expired = data.expired.map(c => `
     <div class="contract-block expired">
-      ${escapeHtml(c.contract_id)}（提案: ${escapeHtml(c.proposer)}、当事者: ${(c.parties||[]).map(escapeHtml).join(', ')}、署名済み: ${(c.signed_by||[]).map(escapeHtml).join(', ')}）— 期限切れ（不成立）
+      ${escapeHtml(c.contract_id)}（提案: ${escapeHtml(seatLabel(c.proposer))}、当事者: ${(c.parties||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}、署名済み: ${(c.signed_by||[]).map(p => escapeHtml(seatLabel(p))).join(', ')}）— 期限切れ（不成立）
     </div>`).join('');
 
   body.innerHTML = `
@@ -602,14 +702,14 @@ async function loadSeat(pid) {
     <div class="tl-item">
       <span class="tl-turn">R${m.round_num}T${m.turn}</span>
       <span class="tl-kind-tag ${m.kind === 'dm' ? 'tag-dm' : 'tag-broadcast'}">${m.kind === 'dm' ? 'DM' : '全体'}</span>
-      ${m.kind === 'dm' ? `${escapeHtml(m.from)} → ${escapeHtml(m.to)}: ` : ''}${escapeHtml(m.message || '（本文なし）')}
+      ${m.kind === 'dm' ? `${escapeHtml(seatLabel(m.from))} → ${escapeHtml(seatLabel(m.to))}: ` : ''}${escapeHtml(m.message || '（本文なし）')}
     </div>`).join('');
   const series = data.asset_timeline.map(a => a.asset);
   const memos = Object.entries(data.round_memos).sort((a, b) => Number(a[0]) - Number(b[0]))
     .map(([rn, memo]) => `<details class="tl-memo"><summary>R${rn}の振り返り</summary><div class="tl-memo-body">${escapeHtml(memo)}</div></details>`).join('');
 
   body.innerHTML = `
-    <h3>${escapeHtml(pid)}（${escapeHtml(data.model_label)}）</h3>
+    <h3>${escapeHtml(seatLabel(pid))}</h3>
     <p>最終資産: ${data.final_assets != null ? yen(data.final_assets) : '進行中'} ／ 順位: ${data.final_rank != null ? data.final_rank : '—'}</p>
     <p>資産推移: ${seatSparkline(series)}</p>
     <h4>投票</h4><ul>${votesRows || '<li>記録なし</li>'}</ul>

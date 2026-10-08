@@ -356,6 +356,15 @@ def get_round(log_dir: Path, game_id: str, round_num: int, *, redact: bool = Tru
         if e.get("phase") == "reflect" and e.get("round_num") == round_num and e.get("memory")
     }
 
+    # 契約の義務の中身は提案イベント（CONTRACT_PROPOSED）にしか無く、別ラウンドで
+    # 提案されたまま成立することがあるため、ラウンド絞り込みの前に全イベントから
+    # contract_id -> obligations を引けるようにしておく（契約タブと同じ中身を出す）。
+    obligations_by_contract: dict[str, list[dict[str, Any]]] = {
+        e["data"]["contract_id"]: e["data"].get("obligations", [])
+        for e in events
+        if e.get("event_type") == "CONTRACT_PROPOSED" and (e.get("data") or {}).get("contract_id")
+    }
+
     question = None
     carryover_before = 0
     timeline: list[dict[str, Any]] = []
@@ -396,6 +405,7 @@ def get_round(log_dir: Path, game_id: str, round_num: int, *, redact: bool = Tru
             timeline.append({
                 "kind": "contract_established", "turn": None, "contract_id": d.get("contract_id"),
                 "parties": d.get("parties"), "contract_seq": d.get("contract_seq"),
+                "obligations": obligations_by_contract.get(d.get("contract_id"), []),
             })
         elif t == "CONTRACT_EXPIRED":
             timeline.append({

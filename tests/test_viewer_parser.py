@@ -86,6 +86,15 @@ def test_get_round_basic_shape_and_memo_attached() -> None:
     assert payments and payments[0]["paid"] == 150000
 
 
+def test_get_round_contract_established_has_obligations() -> None:
+    """成立契約の行に義務の中身が付く（契約タブと同じCONTRACT_PROPOSEDの中身。サイクル3.1）"""
+    round1 = get_round(FIXTURES, "fx_demo", 1)
+    established = [e for e in round1["timeline"] if e["kind"] == "contract_established"]
+    assert established and established[0]["contract_id"] == "C_FIX0001"
+    obligations = established[0]["obligations"]
+    assert obligations and obligations[0]["ob_type"] == "type_b_vote"
+
+
 def test_get_round_clamps_out_of_range() -> None:
     clamped_high = get_round(FIXTURES, "fx_demo", 99)
     assert clamped_high["round_num"] == 2

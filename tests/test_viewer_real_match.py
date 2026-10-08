@@ -111,3 +111,24 @@ def test_loan_amounts_match_facts_report(overview: dict) -> None:
     assert loans_by_pid["P03"] == 5_000_000
     assert loans_by_pid["P12"] == 6_000_000
     assert loans_by_pid["P01"] == 1_200_000
+
+
+def test_r9_established_contracts_carry_obligations() -> None:
+    """ラウンドページの成立契約に義務の中身が付く（サイクル3.1、viewer手直し）"""
+    round9 = get_round(LOGS_DIR, GAME_ID, 9)
+    established = [e for e in round9["timeline"] if e["kind"] == "contract_established"]
+    assert established  # R9は成立10件
+    for item in established:
+        assert item["obligations"], f"{item['contract_id']}に義務が付いていない"
+
+
+def test_contract_seq_54_obligations() -> None:
+    """成立順54番（R12成立、P08/P03）の義務3本の結果区分を確認する"""
+    contracts = get_contracts(LOGS_DIR, GAME_ID)
+    c54 = next(c for c in contracts["established"] if c["contract_seq"] == 54)
+    assert c54["round_established"] == 12
+    assert set(c54["parties"]) == {"P08", "P03"}
+    outcomes = {(ob["obligor"], ob["ob_type"]): ob["outcome"] for ob in c54["obligations"]}
+    assert outcomes[("P03", "type_b_vote")] == "履行"
+    assert outcomes[("P03", "type_c_conditional")] == "支払い発生"
+    assert outcomes[("P08", "type_c_conditional")] == "条件が外れた"

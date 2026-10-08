@@ -657,3 +657,22 @@ table.roster-table th, table.rounds-table th, table.contracts-table th { color: 
   .seat-spark { width: 90px; }
   .round-nav-bar { gap: 4px; }
 }
+
+/* ==== サイクル3.1追記分（手直し。ここから下は3.0の659行には無い） ==== */
+
+/* 概要のラウンド表「詳細」リンクが既定色で読めない問題を直す */
+table.rounds-table a { color: var(--accent); text-decoration: underline; }
+table.rounds-table a:hover { color: var(--cash); }
+
+/* 票の帯の凡例: YES/NOの色見本・人数・各側の席 */
+.vote-legend { display: block; font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.vote-sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin: 0 3px 0 8px; vertical-align: middle; }
+.vote-sw.yes { background: #4fc3f7; }
+.vote-sw.no { background: #e94560; }
+.vote-sw:first-child { margin-left: 0; }
+
+/* ラウンドタイムラインの契約提案・成立に添える義務一覧 */
+ul.ob-list { margin: 6px 0 2px 0; padding-left: 18px; font-size: 12px; }
+
+/* vendor不明時、感情画像の代わりに絵文字を出す（emotionDisplayの保険） */
+.emotion-emoji { display: inline-block; width: 22px; text-align: center; }
