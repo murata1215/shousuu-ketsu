@@ -17,3 +17,4 @@ __pycache__/
 .devrelay-output-history/
 .devrelay-files/
 *.pid
+tests/fixtures/viewer_logs/viewer_index/

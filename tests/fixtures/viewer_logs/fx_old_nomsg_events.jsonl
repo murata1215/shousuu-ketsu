@@ -1,0 +1,14 @@
+{"event_type": "GAME_START", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 0, "phase": "setup", "step": null, "data": {"num_players": 3, "num_rounds": 1, "seed": 2}}
+{"event_type": "LOAN_REVEALED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 0, "phase": "setup", "step": null, "data": {"loans": {"P01": 1200000, "P02": 1200000, "P03": 1200000}}}
+{"event_type": "ROUND_OPEN", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "open", "step": null, "data": {"question": "空は青い", "carryover": 0}}
+{"event_type": "NEGOTIATION_ACTION", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "negotiation", "step": null, "data": {"player_id": "P01", "action": "broadcast", "turn": 1}}
+{"event_type": "ENTRY_FEE_COLLECTED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "commit", "step": null, "data": {"player_id": "P01", "paid": 100000, "borrowed": 0}}
+{"event_type": "ENTRY_FEE_COLLECTED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "commit", "step": null, "data": {"player_id": "P02", "paid": 100000, "borrowed": 0}}
+{"event_type": "ENTRY_FEE_COLLECTED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "commit", "step": null, "data": {"player_id": "P03", "paid": 100000, "borrowed": 0}}
+{"event_type": "VOTE_REVEALED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "settlement", "step": 1, "data": {"votes": {"P01": "YES", "P02": "YES", "P03": "NO"}}}
+{"event_type": "MINORITY_RESOLVED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "settlement", "step": 2, "data": {"minority_side": "NO", "minority_ids": ["P03"], "majority_ids": ["P01", "P02"], "payout_per_minority": 200000, "forfeited_remainder": 0, "carryover_after": 0, "destroyed_carryover": 0}}
+{"event_type": "PAYABLE_LIMIT_FIXED", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "settlement", "step": 5, "data": {"payable_limits": {"P01": 9900000, "P02": 9900000, "P03": 10300000}}}
+{"event_type": "INTEREST", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "finance", "step": null, "data": {"player_id": "P01", "interest_pre": 18000, "interest_post": 0, "new_debt_pre": 1218000, "new_debt_post": 0}}
+{"event_type": "INTEREST", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "finance", "step": null, "data": {"player_id": "P02", "interest_pre": 18000, "interest_post": 0, "new_debt_pre": 1218000, "new_debt_post": 0}}
+{"event_type": "INTEREST", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "finance", "step": null, "data": {"player_id": "P03", "interest_pre": 0, "interest_post": 0, "new_debt_pre": 0, "new_debt_post": 0}}
+{"event_type": "GAME_END", "timestamp": "2026-01-01T00:00:00+00:00", "round_num": 1, "phase": "finance", "step": null, "data": {"final_assets": {"P01": -1218000, "P02": -1218000, "P03": 1300000}, "final_ranks": {"P01": 2, "P02": 2, "P03": 1}}}

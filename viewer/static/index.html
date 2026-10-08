@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>嘘八百万 —少数決— 観戦ビューア</title>
+<script>
+  // テーマを描画前に適用（チラつき防止、dangou-card viewer/static/index.htmlと同じ方式）
+  (function(){ try { var t = localStorage.getItem('viewer-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', t); } catch(e){} })();
+</script>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>嘘八百万 —少数決— 観戦ビューア</h1>
+  <button id="theme-toggle" class="theme-toggle" title="テーマ切替">🌙</button>
+</div>
+
+<div class="games-list" id="games-list">読み込み中…</div>
+
+<script>
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('viewer-theme', theme); } catch (e) {}
+  document.getElementById('theme-toggle').textContent = theme === 'light' ? '☀️' : '🌙';
+}
+document.getElementById('theme-toggle').addEventListener('click', () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  applyTheme(cur === 'light' ? 'dark' : 'light');
+});
+applyTheme(document.documentElement.getAttribute('data-theme') || 'dark');
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text == null ? '' : String(text);
+  return div.innerHTML;
+}
+
+async function loadGames() {
+  const el = document.getElementById('games-list');
+  try {
+    const res = await fetch('api/games');
+    const games = await res.json();
+    if (!games.length) {
+      el.innerHTML = '<div class="games-empty">席の割り当てがある試合はまだありません</div>';
+      return;
+    }
+    el.innerHTML = games.map(g => {
+      const status = g.completed ? '終了' : `R${g.last_round}まで進行`;
+      const winner = g.winner_model_label
+        ? `<span class="winner">1位: ${escapeHtml(g.winner_player_id)}(${escapeHtml(g.winner_model_label)})</span>`
+        : '';
+      const transcript = g.transcript_available ? '' : '<span>会話は表示できません</span>';
+      return `<a class="game-card" href="watch?game=${encodeURIComponent(g.game_id)}">
+        <div class="game-id">${escapeHtml(g.game_id)}</div>
+        <div class="meta">
+          <span>${escapeHtml(g.num_players)}席</span>
+          <span>${escapeHtml(status)}</span>
+          ${winner}
+          ${transcript}
+        </div>
+      </a>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="games-empty">試合一覧の取得に失敗しました</div>';
+  }
+}
+loadGames();
+</script>
+
+</body>
+</html>
