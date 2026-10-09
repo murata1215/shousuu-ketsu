@@ -158,23 +158,23 @@ def test_validate_terms_wins_round_accepts_share_percent_for_self() -> None:
     assert error is None
 
 
-def test_validate_terms_share_percent_rejected_for_other_target() -> None:
-    """wins_roundでもtarget_player!=obligorならshare_percentは使えない（§6.4）"""
-    terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional",
-              "round_num": 2,
-              "details": {"share_percent": 50, "condition_type": "wins_round",
-                           "condition": {"target_player": "P07"}}}]
-    error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
+def test_acceptance_36_share_percent_rejected_outside_wins_round_or_other_target() -> None:
+    """#36: 割合指定をwins_round以外で使う。または対象者が義務者でない
+    → 提案は不成立（形式エラー）"""
+    # (a) wins_roundでもtarget_player!=obligorならshare_percentは使えない
+    terms_other_target = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional",
+                            "round_num": 2,
+                            "details": {"share_percent": 50, "condition_type": "wins_round",
+                                        "condition": {"target_player": "P07"}}}]
+    error = validate_terms(terms_other_target, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
     assert error is not None
 
-
-def test_validate_terms_share_percent_rejected_for_minority_side() -> None:
-    """share_percentはwins_round以外では使えない（§6.4/§12.3 #36）"""
-    terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional",
-              "round_num": 1, "vote_num": 1,
-              "details": {"share_percent": 50, "condition_type": "minority_side",
-                           "condition": {"side": "YES"}}}]
-    error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
+    # (b) share_percentはwins_round以外（minority_side等）では使えない
+    terms_minority_side = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional",
+                             "round_num": 1, "vote_num": 1,
+                             "details": {"share_percent": 50, "condition_type": "minority_side",
+                                         "condition": {"side": "YES"}}}]
+    error = validate_terms(terms_minority_side, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
     assert error is not None
 
 
@@ -421,7 +421,7 @@ def test_obligations_due_round_level_excludes_vote_level() -> None:
 # Game経由: 成立順の付番・失効・取り消しアクションの不在
 # ---------------------------------------------------------------------------
 
-def test_contract_seq_assigned_in_establishment_order_not_proposal_order() -> None:
+def test_acceptance_41_contract_seq_assigned_in_establishment_order_not_proposal_order() -> None:
     """
     提案はP05発が先でも、署名がそろうのが後ならcontract_seqは後になる（§6.1）。
     """
@@ -452,7 +452,7 @@ def test_contract_seq_assigned_in_establishment_order_not_proposal_order() -> No
     assert contracts_by_proposer["P01"].contract_seq < contracts_by_proposer["P05"].contract_seq
 
 
-def test_unsigned_proposal_expires_at_vote_end() -> None:
+def test_acceptance_44_unsigned_proposal_expires_at_vote_end() -> None:
     """署名がそろわない提案は、提案した投票の締切で失効する（§6.1/§12.3 #44）"""
     agents = make_roster({}, num_players=12)
     terms = [{"obligor": "P01", "counterparty": "P02", "ob_type": "type_a_payment",

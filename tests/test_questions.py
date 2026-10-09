@@ -281,3 +281,28 @@ def test_load_questions_file_wrong_count_raises(tmp_path):
     f.write_text("質問1である\n質問2である\n", encoding="utf-8")
     with pytest.raises(ValueError):
         load_questions_file(f, expected=12)
+
+
+# --- v0.4対応（サイクル4.2送り、§12.3 #47・#48） ---
+#
+# v0.4は1試合24問（4ラウンド×最大6投票、§5.1）・直近30問を避ける
+# （§10/§11.2暫定7）。本サイクル（4.0）はエンジン側の「24問を受け取り、
+# 投票ごとに順に1問使う」だけを実装し（engine/game.py::_phase_open、
+# Game.__init__のquestions_per_game検証）、出題AIの呼び出し・予備リストの
+# 拡張・履歴ファイルの運用はllm/questions.pyの責務のままサイクル4.2で
+# 対応する。QUESTION_COUNT=12・直近10問はv0.3の値のまま（上のテストは
+# v0.3の値で変わらず緑のため無改修で残した）。
+
+@pytest.mark.skip(reason="llm/questions.pyの24問・直近30問対応（§5.1/§10）はサイクル4.2")
+def test_acceptance_47_adapter_failure_falls_back_to_pool_avoiding_recent_30() -> None:
+    """#47: 出題AIの呼び出し失敗 → 予備リストから直近30問を避けて24問を選び、
+    試合は続行する（llm/questions.py::QUESTION_COUNT/recent_questions窓を
+    v0.4の24問・30問へ変更した上で確認する、サイクル4.2）"""
+
+
+@pytest.mark.skip(reason="data/question_history.jsonlへの追記（§5.1）のv0.4対応はサイクル4.2")
+def test_acceptance_48_only_used_9_questions_appended_to_history() -> None:
+    """#48: 試合で使った質問が9問 → 履歴ファイルに9行だけ追記する。
+    使わなかった15問は書かない（Game.on_question_publishedフック経由で
+    呼び出し側がdata/question_history.jsonlに書く処理自体がllm/側にあり、
+    サイクル4.2で対応する）"""

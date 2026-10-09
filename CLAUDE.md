@@ -4,8 +4,18 @@
 
 ## ドキュメント
 
-- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_3.md`（`doc/..._v0_1.md`・`doc/..._v0_2.md` は履歴として残す。変更しない）
+- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4.md`（`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md` は履歴として残す。変更しない）
 - 流用調査レポート: `doc/analysis/reuse_investigation.md`（サイクル0.1。`~/dangou-card`/`~/gentei-janken` からの流用方針・部品表・優劣・仕様書あいまい点16件・段取り案）
+- 受け入れテスト対応表: `doc/analysis/acceptance_v0_4.md`（サイクル4.0。v0.4 §12.3の50件とpytest関数の対応）
+
+## v0.4: 「ラウンド」と「投票」は別の単位（サイクル4.0）
+
+v0.3まで `round_num` と呼んでいたもの（投票1回）は、v0.4では**「投票」（vote、`vote_num`、1〜6）**である。
+v0.4の**「ラウンド」**（`round_num`、1〜4）は、12人全員が参加費を出してから山の行き先が決まるまでの
+1回の勝負で、中に投票が1〜6回入る（仕様書v0.4 §1.1）。`engine/` 内で新たに「ラウンド＝投票1回」の意味で
+`round` を使わないこと。精算も「投票の精算」（§7.3、`engine/settlement.py::settle_vote`）と
+「ラウンドの精算」（§7.4、`settle_round`）の2段に分かれている。イベントログは `round_num` と
+`vote_num` の両方を持つ（`engine/models.py::GameEvent`）。
 
 ## 他プロジェクトの扱い
 
@@ -39,5 +49,8 @@ uv run pytest -q
 4. **同型バグの片側だけ直す事故**（gentei-janken サイクル2.33）: プロンプト生成関数の一部でだけ `"json"` という語が指示文から抜け、該当プロバイダ（openai_compat系）だけ400エラーになった。同じ構造の関数が複数ある場合は、修正時に全数を検査する。
 5. **長い処理は裏で走らせず、1本ずつ表で回す**（shousuu-ketsu サイクル1.3）: Bot検証（8条件×1,000試合）のような時間のかかる処理は、バックグラウンド実行や並列実行にすると進捗も失敗も見えず、「同じコマンドを繰り返して待つ」事故につながる。`--scenario` を1つずつ指定してフォアグラウンドで1本ずつ回し、完了を確認してから次に進む。
 6. **テストデータ・見本記録に実在のアドレス・利用者名・パスを使わない**（shousuu-ketsu サイクル3.0）: ビューアの単体テスト・fixtureの見本記録に、作業用の実在メールアドレスと実在の実行環境パス（利用者名入り）がそのまま書かれ、公開リポジトリにpushされた。テストデータは必ず架空の値（`example.com`のアドレス、架空のユーザー名・パス）で作る。再発防止として `tests/test_no_real_contacts.py::test_no_real_email_addresses_in_tracked_files` がgit管理下の全ファイルを機械的に走査する（`example.com`/`example.org`/`example.net`/`noreply@...`/`git@github.com`以外のメールらしき文字列があれば失敗）。
+7. **ビューアがエンジンのConfig既定値を直接読むと、ルール変更で過去の記録の表示が静かに狂う**（shousuu-ketsu サイクル4.0）: `viewer/log_parser.py` が `engine.config.GameConfig().entry_fee`（参加費の既定値）を読んで資産推移を復元していたため、v0.4で参加費が10万→100万に変わると、v0.3の記録（`l12r12_2002`等）の表示が1円単位で狂った。しかもイベントログの`GAME_START`にconfig値自体が記録されていないため、この種の不整合はテストで固定していない限り検出できない。直した方針: ビューア側はConfigを参照せず、その試合の実イベント（`ENTRY_FEE_COLLECTED`の`paid+borrowed`）から値を動的に求める。ログに残らない値をビューア側がConfigの既定値で補う設計は避け、イベント自体から導出できる形にする。
+8. **本番コードがテストコードを逆輸入する構造を作らない**（shousuu-ketsu サイクル4.0）: v0.3で `sim/scenarios.py`・`scripts/dry_run.py`（本番コード）が `tests/helpers.py::RandomContractAgent`（テストコード）を直接importしていた。テスト専用モジュールを本番の実行パスが握ると、テストの都合（命名・配置）が本番コードの変更を縛る。v0.4で `bots/random_contract_bot.py::RandomContractBot` へ移設し、本番コードからテストコードへの依存をゼロにした。Botやエージェントなど複数箇所から使われる無作為生成ロジックは、最初から `bots/`（本番側）に置く。
+9. **ルールの意味が変わる改修では、旧名のモジュール・型を「改名」ではなく「作り直し」で扱う**（shousuu-ketsu サイクル4.0）: v0.3の `engine/minority.py::resolve_minority`（1回の投票=1ラウンドで配当まで行う）は、v0.4では判定（`engine/vote.py::resolve_vote`）と配当（`engine/round.py`）に分離した。関数名を変えずに中身だけ差し替えると、呼び出し側（`sim/counterfactual.py`等）が新旧どちらの契約で呼んでいるか見分けられなくなる。意味が変わるときはモジュール名・関数名も変え、importエラーで旧呼び出し元を機械的に洗い出せるようにする（実際に `grep -rn "engine.minority\|resolve_minority"` で全呼び出し元を洗い出してから着手した）。
 
 （この2点は本サイクル0.2の対象範囲外。実装時に再発させないための記録として残す。）

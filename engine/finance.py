@@ -38,7 +38,7 @@ def execute_finance(
         new_p, interest_pre, interest_post = player_ops.apply_interest(p, config)
         updated[pid] = new_p
         interest_total += interest_pre + interest_post
-        logger.log("INTEREST", round_num, "finance", data={
+        logger.log("INTEREST", round_num, "finance", visibility="self", data={
             "player_id": pid,
             "interest_pre": interest_pre,
             "interest_post": interest_post,
