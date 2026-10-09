@@ -4,9 +4,10 @@
 
 ## ドキュメント
 
-- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4.md`（`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md` は履歴として残す。変更しない）
+- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4_1.md`（v0.4.1。`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md`・`doc/..._v0_4.md` は履歴として残す。変更しない）。v0.4.1はv0.4からルールの変更はなく、サイクル4.0の結果を反映した書き直し（§11.6）
 - 流用調査レポート: `doc/analysis/reuse_investigation.md`（サイクル0.1。`~/dangou-card`/`~/gentei-janken` からの流用方針・部品表・優劣・仕様書あいまい点16件・段取り案）
-- 受け入れテスト対応表: `doc/analysis/acceptance_v0_4.md`（サイクル4.0。v0.4 §12.3の50件とpytest関数の対応）
+- 受け入れテスト対応表: `doc/analysis/acceptance_v0_4.md`（サイクル4.0・4.1。v0.4.1 §12.3の54件とpytest関数の対応）
+- Bot検証レポート（v0.4）: `doc/analysis/bot_simulation_report_v0_4.md`（サイクル4.1。V1〜V10・机上計算との比較・暫定値を変えた場合の比較）
 
 ## v0.4: 「ラウンド」と「投票」は別の単位（サイクル4.0）
 
@@ -52,5 +53,6 @@ uv run pytest -q
 7. **ビューアがエンジンのConfig既定値を直接読むと、ルール変更で過去の記録の表示が静かに狂う**（shousuu-ketsu サイクル4.0）: `viewer/log_parser.py` が `engine.config.GameConfig().entry_fee`（参加費の既定値）を読んで資産推移を復元していたため、v0.4で参加費が10万→100万に変わると、v0.3の記録（`l12r12_2002`等）の表示が1円単位で狂った。しかもイベントログの`GAME_START`にconfig値自体が記録されていないため、この種の不整合はテストで固定していない限り検出できない。直した方針: ビューア側はConfigを参照せず、その試合の実イベント（`ENTRY_FEE_COLLECTED`の`paid+borrowed`）から値を動的に求める。ログに残らない値をビューア側がConfigの既定値で補う設計は避け、イベント自体から導出できる形にする。
 8. **本番コードがテストコードを逆輸入する構造を作らない**（shousuu-ketsu サイクル4.0）: v0.3で `sim/scenarios.py`・`scripts/dry_run.py`（本番コード）が `tests/helpers.py::RandomContractAgent`（テストコード）を直接importしていた。テスト専用モジュールを本番の実行パスが握ると、テストの都合（命名・配置）が本番コードの変更を縛る。v0.4で `bots/random_contract_bot.py::RandomContractBot` へ移設し、本番コードからテストコードへの依存をゼロにした。Botやエージェントなど複数箇所から使われる無作為生成ロジックは、最初から `bots/`（本番側）に置く。
 9. **ルールの意味が変わる改修では、旧名のモジュール・型を「改名」ではなく「作り直し」で扱う**（shousuu-ketsu サイクル4.0）: v0.3の `engine/minority.py::resolve_minority`（1回の投票=1ラウンドで配当まで行う）は、v0.4では判定（`engine/vote.py::resolve_vote`）と配当（`engine/round.py`）に分離した。関数名を変えずに中身だけ差し替えると、呼び出し側（`sim/counterfactual.py`等）が新旧どちらの契約で呼んでいるか見分けられなくなる。意味が変わるときはモジュール名・関数名も変え、importエラーで旧呼び出し元を機械的に洗い出せるようにする（実際に `grep -rn "engine.minority\|resolve_minority"` で全呼び出し元を洗い出してから着手した）。
+10. **公開（public）の記録を作ったら、プレイヤーに渡す情報にも入れる**（shousuu-ketsu サイクル4.1）: サイクル4.0の `engine/game.py` は、契約の成立本数（`TURN_CONTRACTS_ESTABLISHED`）・型B違反者・払いきれなかった者・AUTO COMMITを `visibility="public"` でイベントログには残していたが、`_build_visible_state()`（プレイヤーに渡す辞書）には入れていなかった。`GameEvent.visibility` は宣言タグにすぎず、engineはそれを読み返して`visible_state`の内容を決めているわけではない（`engine/models.py::Visibility`のdocstring参照）。つまり「公開と記録したのにプレイヤーには届かない」はテストで固定していない限り検出できない構造だった。再発防止として `tests/test_public_disclosure.py::test_every_public_event_type_has_a_visible_state_field` が、`tests/test_event_visibility.py::FIXED_VISIBILITY` の public なイベント種別すべてに対応する `visible_state` の項目名が存在することを機械的に確認する。公開のイベントを新設するときは、必ずこのテストの表（`PUBLIC_EVENT_DELIVERY`）にも項目を追加すること。
 
 （この2点は本サイクル0.2の対象範囲外。実装時に再発させないための記録として残す。）

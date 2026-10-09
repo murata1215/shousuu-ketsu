@@ -350,6 +350,20 @@ class VoteOutcome(BaseModel):
     """このラウンドがこの投票で終わるか（決着して残りがsurvivors_max以下、
     または打ち切り。§4.5/§4.4）"""
 
+    type_b_violator_ids: list[str] = Field(default_factory=list)
+    """この投票の精算（§7.3手順3）で型Bの義務に違反した者のプレイヤーID。
+    resolve_vote（純粋関数）では空のまま作られ、game.pyが精算後に
+    model_copyで埋める（§8.1: 投票の精算で出た公示）"""
+
+    payment_shortfall_ids: list[str] = Field(default_factory=list)
+    """この投票の精算（§7.3手順8）で契約の支払いを払いきれなかった者の
+    プレイヤーID。resolve_voteでは空のまま作られ、game.pyが精算後に
+    model_copyで埋める（§8.1: 投票の精算で出た公示）"""
+
+    auto_commit_ids: list[str] = Field(default_factory=list)
+    """この投票でAUTO COMMITになったプレイヤーID（§4.6）。resolve_voteでは
+    空のまま作られ、game.pyが精算後にmodel_copyで埋める（§8.1）"""
+
 
 class RoundOutcome(BaseModel):
     """1ラウンドの公開情報サマリ（§4.1/§4.5/§7.4/§8）"""
@@ -392,7 +406,14 @@ class RoundOutcome(BaseModel):
 
     payment_shortfall_ids: list[str] = Field(default_factory=list)
     """このラウンドの投票精算・ラウンド精算のいずれかで契約の支払いを
-    払いきれなかった者のプレイヤーID（§7.3手順8・§7.4手順7/§8）"""
+    払いきれなかった者のプレイヤーID（§7.3手順8・§7.4手順7/§8）。
+    投票精算分と合算したunion（既存互換）。ラウンド精算分だけは
+    round_settlement_shortfall_idsを見る（§8.1）"""
+
+    round_settlement_shortfall_ids: list[str] = Field(default_factory=list)
+    """このラウンドの精算（§7.4手順7）だけで契約の支払いを払いきれなかった者
+    のプレイヤーID（投票精算分は含まない。§8.1「ラウンドの精算で払いきれ
+    なかった者」）"""
 
     public_ranks: dict[str, int] | None = None
     """R2終了後のみ設定される全員の順位（名前と順位のみ、§7.6）"""

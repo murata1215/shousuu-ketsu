@@ -12,6 +12,9 @@
 （tests.helpers.RandomContractAgentは廃止）。
 """
 
+import copy
+from typing import Any
+
 from engine.config import GameConfig
 from engine.models import (
     Action, ContractSignAction, PassAction, PlayerState, Vote,
@@ -77,6 +80,43 @@ class FailingCommitAgent(ScriptedAgent):
 
     def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         raise RuntimeError("invalid output (simulated)")
+
+
+class VisibleStateRecordingAgent(PlayerAgent):
+    """
+    内部のエージェント（inner）の判断はそのまま使い、negotiate()/commit()の
+    たびに (round_num, vote_num, turn, visible_state) のコピーを記録する
+    （サイクル4.1: §8.1の公示がいつ・どの形でvisible_stateに届くかを
+    確かめる受け入れ#51〜#53・横断テスト用）。
+
+    deepcopyで控えるのは、以降のゲーム進行でvisible_state内の辞書が
+    （同一インスタンスの再利用等により）書き換わっても、記録した時点の
+    スナップショットが変わらないようにするため。
+    """
+
+    def __init__(self, inner: PlayerAgent) -> None:
+        self.inner = inner
+        self.negotiate_snapshots: list[tuple[int, int, int, dict[str, Any]]] = []
+        self.commit_snapshots: list[tuple[int, int, dict[str, Any]]] = []
+
+    def choose_loan(self, config: GameConfig) -> int:
+        return self.inner.choose_loan(config)
+
+    def negotiate(
+        self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
+    ) -> Action:
+        self.negotiate_snapshots.append((round_num, vote_num, turn, copy.deepcopy(visible_state)))
+        return self.inner.negotiate(player_state, round_num, vote_num, turn, visible_state)
+
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
+        self.commit_snapshots.append((round_num, vote_num, copy.deepcopy(visible_state)))
+        return self.inner.commit(player_state, round_num, vote_num, visible_state)
+
+    def reflect(self, player_state: PlayerState, round_num: int, visible_state: dict) -> None:
+        return self.inner.reflect(player_state, round_num, visible_state)
+
+    def post_game_reflect(self, post_game_context: dict[str, Any]) -> dict[str, Any] | None:
+        return self.inner.post_game_reflect(post_game_context)
 
 
 class FakeAdapter:

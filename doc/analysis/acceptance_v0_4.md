@@ -1,9 +1,11 @@
-# 受け入れテスト対応表（v0.4 §12.3、サイクル4.0）
+# 受け入れテスト対応表（v0.4.1 §12.3、サイクル4.0・4.1）
 
-仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4.md` §12.3 の50件すべてに対応する
-pytest関数の一覧。命名は既存コードベース（v0.3）の慣例
+仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_1.md` §12.3 の54件すべてに
+対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 （`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48はエンジンの範囲外
 （出題AI・履歴ファイル）のため、理由つきでskipしている（サイクル4.2送り）。
+#51〜#54はサイクル4.1で追加された（v0.4.1 §11.6 #8。§8.1「公示をプレイヤーに
+渡す形」の確認）。
 
 | # | 場面（仕様書の表現） | pytest関数 | 状態 |
 | --- | --- | --- | --- |
@@ -48,7 +50,7 @@ pytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 | 39 | 同じ精算で200万受け取り・150万支払い。現金0、残り枠0 | `tests/test_settlement_v0_4.py::test_acceptance_39_receivable_not_usable_as_funding_source` | 合格 |
 | 40 | 支払える上限400万。成立順1でP02へ300万、成立順5でP08へ300万 | `tests/test_settlement_v0_4.py::test_acceptance_40_payable_limit_split_by_contract_seq` | 合格 |
 | 41 | 提案はC05が先、全員の署名がそろったのはC01が先 | `tests/test_contracts.py::test_acceptance_41_contract_seq_assigned_in_establishment_order_not_proposal_order` | 合格 |
-| 42 | 支払える上限100万。成立順1の型B違約金100万と成立順7の型Aが同じ精算 | `tests/test_settlement_v0_4.py::test_acceptance_42_partial_type_b_penalty_before_type_a` | 合格（読み替え。下記注1） |
+| 42 | 支払える上限100万。成立順1の型B違約金100万と、成立順7の型C（同じ投票が対象）100万が同じ精算 | `tests/test_settlement_v0_4.py::test_acceptance_42_partial_type_b_penalty_before_type_c_same_vote` | 合格 |
 | 43 | 契約が成立した巡の終わり | `tests/test_secrecy_contracts.py::test_acceptance_43_non_party_state_has_no_contract_trace`（公示の本数のみであることは`tests/test_secrecy_contracts.py::test_turn_disclosure_contains_only_count_no_names`でも確認） | 合格 |
 | 44 | 署名がそろわない提案 | `tests/test_contracts.py::test_acceptance_44_unsigned_proposal_expires_at_vote_end` | 合格 |
 | 45 | 交渉の巡 | `tests/test_game_loop.py::test_acceptance_45_negotiation_turn_limits_by_vote_kind` | 合格 |
@@ -57,25 +59,33 @@ pytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 | 48 | 試合で使った質問が9問 | `tests/test_questions.py::test_acceptance_48_only_used_9_questions_appended_to_history`（エンジン側の対応する範囲は`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`で確認済み） | **skip（理由: サイクル4.2。下記注2）** |
 | 49 | R2のFinance終了後 | `tests/test_rank.py::test_acceptance_49_r2_public_ranks_names_only_same_amount_same_rank` | 合格 |
 | 50 | 借入額の選択中 | `tests/test_game_loop.py::test_acceptance_50_choose_loan_cannot_see_others` | 合格 |
+| 51 | 契約が成立した巡の、次の手番 | `tests/test_public_disclosure.py::test_acceptance_51_turn_contract_count_visible_from_next_turn_only` | 合格 |
+| 52 | R1V1で型B違反・払いきれなかった者・自動代行が出て、ラウンドがV2へ続く | `tests/test_public_disclosure.py::test_acceptance_52_vote_settlement_disclosures_visible_from_next_vote_open` | 合格 |
+| 53 | R1V3の交渉中。R2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_53_vote_and_round_history_accumulate_across_the_game` | 合格 |
+| 54 | 形式に合わない提案をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_54_rejection_reason_only_to_proposer` | 合格 |
 
 ## 集計
 
-- 合格: 48件
+- 合格: 52件
 - skip（理由つき、サイクル4.2へ送付）: #47・#48 の2件
-- 1件も省いていない（#1〜#50がすべて表に存在する）
+- 1件も省いていない（#1〜#54がすべて表に存在する）
 
-## 注1: #42の読み替え（プラン§1 ★19）
+## 注1: #42（v0.4.1での仕様書修正の反映）
 
-仕様書の#42は原文「成立順1の型B違約金100万と、成立順7の**型A**100万が同じ精算」だが、
-v0.4は精算が「投票の精算」（§7.3、型B違約金はここ）と「ラウンドの精算」（§7.4、型Aはここ）
-の2段に分かれ、支払える上限（手順5/手順4）も精算ごとに別々に固定されるため、
-型Bの違約金と型Aが同じ精算に来ることは構造的にない。
+v0.4（サイクル4.0時点）の仕様書の#42は原文「成立順1の型B違約金100万と、
+成立順7の**型A**100万が同じ精算」だったが、v0.4は精算が「投票の精算」
+（§7.3、型B違約金はここ）と「ラウンドの精算」（§7.4、型Aはここ）の2段に
+分かれ、支払える上限（手順5/手順4）も精算ごとに別々に固定されるため、
+型Bの違約金と型Aが同じ精算に来ることは構造的にない。サイクル4.0では、
+同じ投票の精算に「成立順1の型B違約金100万」と「成立順7の型C（同じ投票を
+対象にしたin_minority、100万）」を置く読み替えで、「同じ決済・成立順の
+優先」という#42の検証意図を保ったまま確かめていた。
 
-本テストは、同じ投票の精算に「成立順1の型B違約金100万」と「成立順7の型C
-（同じ投票を対象にしたin_minority、100万）」を置くことで、「同じ決済・
-成立順の優先」という#42の検証意図（上限に収まる義務だけが支払われ、
-以降は0円になる）を保ったまま確かめている。仕様書の表現自体は変更していない
-（完了報告の仕様書修正候補として報告する）。
+v0.4.1 §11.6 #1でこの指摘が仕様書本文に反映され、#42は現在「成立順7の
+**型C**（同じ投票が対象）」という原文になっている（サイクル4.0が指摘した
+とおりの形）。テスト本体はサイクル4.0時点から変更しておらず、
+docstringとpytest関数名だけをこの経緯に合わせて更新した
+（`_before_type_a` → `_before_type_c_same_vote`）。
 
 ## 注2: #47・#48をskipにした理由
 
@@ -96,7 +106,15 @@ v0.4は精算が「投票の精算」（§7.3、型B違約金はここ）と「�
 
 ## 既存エンジンテストとの関係
 
-受け入れテスト50件に加えて、エンジンの単体テスト（`test_vote_round.py`・
+受け入れテスト54件に加えて、エンジンの単体テスト（`test_vote_round.py`・
 `test_settlement_v0_4.py`・`test_contracts.py`・`test_event_visibility.py`等）
 と、追加確認3点（保存則・再現性・投票回数の上限、`test_invariants.py`）で
 エンジン全体の整合性を確認している。テスト件数の内訳は devlog を参照。
+
+`tests/test_public_disclosure.py`には#51〜#54に加えて、横断テスト2本
+（`test_every_public_event_type_has_a_visible_state_field`・
+`test_public_event_payloads_reach_players`）がある。公開（public）と区分した
+イベント種別ごとに、対応する情報が`visible_state`のどの項目に入るかを表で
+固定し、公開のイベントを新設してvisible_stateへの反映を忘れた場合に機械的に
+検出できるようにしたもの（サイクル4.1で見つかった「公示の渡し漏れ」と同じ
+種類の事故の再発防止、CLAUDE.md落とし穴⑩参照）。

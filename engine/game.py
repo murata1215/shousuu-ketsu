@@ -127,6 +127,15 @@ class Game:
         self._current_vote_auto_ids: set[str] = set()
         self._last_action_error: dict[str, str] = {}
 
+        self._round_vote_outcomes: list[VoteOutcome] = []
+        """現在のラウンドで終わった投票（§8.1: 次の投票のOpenから全員に渡す。
+        ラウンド開始でリセットする）"""
+
+        self._round_turn_contract_counts: list[dict[str, int]] = []
+        """現在のラウンドの各巡の契約成立本数
+        [{"vote_num", "turn", "count"}, …]（§8.1: 次の手番から渡す。
+        ラウンド開始でリセットする）"""
+
         self._last_vote_outcome: VoteOutcome | None = None
         self._last_round_outcome: RoundOutcome | None = None
         self._public_ranks_history: dict[int, dict[str, int]] = {}
@@ -174,11 +183,12 @@ class Game:
         self._eliminated_ids = set()
         self._consecutive_ties = 0
 
-        votes_in_round: list[VoteOutcome] = []
         round_auto_ids: set[str] = set()
         round_violator_ids: set[str] = set()
         round_shortfall_ids: set[str] = set()
         self._round_established_seqs = []
+        self._round_vote_outcomes = []
+        self._round_turn_contract_counts = []
 
         vote_num = 0
         round_over = False
@@ -193,7 +203,7 @@ class Game:
                     f"({self.config.max_votes_per_round})",
                 )
 
-            max_turns = self._negotiation_max_turns(vote_num, votes_in_round)
+            max_turns = self._negotiation_max_turns(vote_num, self._round_vote_outcomes)
 
             self._phase_open(round_num, vote_num)
             self._phase_negotiation(round_num, vote_num, max_turns)
@@ -206,7 +216,16 @@ class Game:
             )
             self._assert_cash_non_negative(round_num, vote_num, "settlement")
 
-            votes_in_round.append(outcome)
+            # この投票の精算で出た公示（型B違反者・払いきれなかった者・
+            # AUTO COMMIT）をVoteOutcomeへ乗せる。次の投票のOpenから渡す
+            # （ラウンドの終わりを待たない、§8.1・受け入れ#52）。
+            outcome = outcome.model_copy(update={
+                "type_b_violator_ids": sorted(violator_ids),
+                "payment_shortfall_ids": sorted(shortfall_ids),
+                "auto_commit_ids": sorted(self._current_vote_auto_ids),
+            })
+
+            self._round_vote_outcomes.append(outcome)
             round_auto_ids |= self._current_vote_auto_ids
             round_violator_ids |= set(violator_ids)
             round_shortfall_ids |= set(shortfall_ids)
@@ -219,13 +238,15 @@ class Game:
             self._last_vote_outcome = outcome
             round_over = outcome.round_over
 
+        votes_in_round = self._round_vote_outcomes
         aborted = votes_in_round[-1].result == "abort"
-        round_shortfall_ids |= set(
+        round_settlement_shortfall_ids = sorted(
             self._phase_round_settlement(
                 round_num, votes_in_round, carryover_in, self._pot,
                 aborted=aborted, is_final_round=is_final_round,
             ),
         )
+        round_shortfall_ids |= set(round_settlement_shortfall_ids)
         self._assert_cash_non_negative(round_num, None, "round_settlement")
 
         self._phase_finance(
@@ -233,6 +254,7 @@ class Game:
             auto_commit_ids=round_auto_ids,
             type_b_violator_ids=round_violator_ids,
             payment_shortfall_ids=round_shortfall_ids,
+            round_settlement_shortfall_ids=round_settlement_shortfall_ids,
         )
         self._assert_cash_non_negative(round_num, None, "finance")
 
@@ -290,12 +312,18 @@ class Game:
         ranks = player_ops.assets_ranking(self.players.values())
         pending = sorted(self.agents)
 
+        round_results = [self._round_result_view(r) for r in self.round_summaries]
+
         def _call(pid: str) -> dict[str, Any] | None:
             r = ranks[pid]
             context = {
                 "own_rank": r.rank,
                 "own_rank_tied": r.tied,
                 "final_assets": result.final_assets.get(pid),
+                # §8.1末尾: 最終ラウンド（R4）の分の公示は、次のラウンドの
+                # Openが無いので試合後の振り返りに渡す。round_summariesは
+                # この時点でR4まで埋まっている。
+                "round_results": round_results,
             }
             try:
                 return self.agents[pid].post_game_reflect(context)
@@ -470,6 +498,9 @@ class Game:
                 action = agent.negotiate(p, round_num, vote_num, turn, visible_state)
 
                 if isinstance(action, PassAction):
+                    # §7.5「直前の自分の行動」。passも「行動」なので、前の
+                    # 不成立の理由はここで消える（持ち越さない）。
+                    self._last_action_error.pop(pid, None)
                     self.logger.log(
                         "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
                         visibility="spectator",
@@ -509,6 +540,11 @@ class Game:
             self.logger.log(
                 "TURN_CONTRACTS_ESTABLISHED", round_num, "negotiation", vote_num=vote_num,
                 visibility="public", data={"turn": turn, "count": established_this_turn},
+            )
+            # §8.1: その巡で成立した契約の本数は次の手番から全員に渡す。
+            # 0本の巡も一覧に残す（イベントログと同じ粒度にする、あいまい点2）。
+            self._round_turn_contract_counts.append(
+                {"vote_num": vote_num, "turn": turn, "count": established_this_turn},
             )
 
             if all_passed:
@@ -780,6 +816,7 @@ class Game:
         auto_commit_ids: set[str],
         type_b_violator_ids: set[str],
         payment_shortfall_ids: set[str],
+        round_settlement_shortfall_ids: list[str],
     ) -> None:
         updated, interest_total = execute_finance(self.players, round_num, self.config, self.logger)
         self.players = updated
@@ -790,6 +827,7 @@ class Game:
             "votes": list(votes_in_round),
             "interest_total": interest_total,
             "auto_commit_ids": sorted(auto_commit_ids),
+            "round_settlement_shortfall_ids": round_settlement_shortfall_ids,
             "established_contract_seqs": sorted(self._round_established_seqs),
             "type_b_violator_ids": sorted(type_b_violator_ids),
             "payment_shortfall_ids": sorted(payment_shortfall_ids),
@@ -890,17 +928,76 @@ class Game:
             "obligations_due": obligations_due,
         }
 
+    def _vote_result_view(self, outcome: VoteOutcome) -> dict[str, Any]:
+        """
+        1回の投票の公開情報（§8.1）
+
+        last_vote_result・round_vote_results・round_results[].votes の
+        3か所で同じ形を使う（CLAUDE.md落とし穴④対策: 同じ形を複数箇所に
+        書くと修正漏れが起きる）。
+        """
+        return {
+            "round_num": outcome.round_num,
+            "vote_num": outcome.vote_num,
+            "result": outcome.result,
+            "yes_ids": outcome.yes_ids,
+            "no_ids": outcome.no_ids,
+            "eliminated_ids": outcome.eliminated_ids,
+            "remaining_ids": outcome.remaining_ids,
+            "minority_side": outcome.minority_side.value if outcome.minority_side else None,
+            "consecutive_ties_after": outcome.consecutive_ties_after,
+            "extension_fee_collected": outcome.extension_fee_collected,
+            "type_b_violator_ids": outcome.type_b_violator_ids,
+            "payment_shortfall_ids": outcome.payment_shortfall_ids,
+            "auto_commit_ids": outcome.auto_commit_ids,
+        }
+
+    def _round_result_view(self, outcome: RoundOutcome) -> dict[str, Any]:
+        """
+        1ラウンドの公開情報（§8.1）。round_results の要素の形。
+
+        このラウンドの全投票（votesキー、ラウンド最後の投票で出た公示も
+        ここに含まれる）と、ラウンドの精算の結果（勝ち残り・受け取った額・
+        打ち切り・持ち越し・ラウンドの精算だけで払いきれなかった者）を持つ。
+        """
+        return {
+            "round_num": outcome.round_num,
+            "aborted": outcome.aborted,
+            "winner_ids": outcome.winner_ids,
+            "payout_per_winner": outcome.payout_per_winner,
+            "forfeited_remainder": outcome.forfeited_remainder,
+            "carryover_in": outcome.carryover_in,
+            "carryover_out": outcome.carryover_out,
+            "destroyed_pot": outcome.destroyed_pot,
+            "pot_final": outcome.pot_final,
+            "round_settlement_shortfall_ids": outcome.round_settlement_shortfall_ids,
+            "payment_shortfall_ids": outcome.payment_shortfall_ids,
+            "votes": [self._vote_result_view(v) for v in outcome.votes],
+        }
+
     def _build_visible_state(
         self, round_num: int, vote_num: int, for_player_id: str | None = None,
     ) -> dict[str, Any]:
         """
-        エージェントに渡す公開情報の辞書を構築する（§8）
+        エージェントに渡す公開情報の辞書を構築する（§8/§8.1）
 
         秘匿情報（現金・借金残高・残り借入枠・他人の順位・DM・締切前の投票先・
         契約の当事者・内容・成立順）は for_player_id 本人（当事者）の分のみ
         含め、他プレイヤーには一切渡さない。v0.4では契約の存在そのものが
         非公開になったため（§1.2/§8）、v0.3にあった`contracts_public`
         （全員に見える契約一覧）は廃止した。
+
+        §8.1で足した3項目（サイクル4.1、受け入れ#51〜#53）:
+        - round_contract_counts: 現在のラウンドの各巡の契約成立本数一覧
+          （次の手番から、当事者名・内容・成立順は入れない）
+        - round_vote_results: 現在のラウンドの、これまでの全投票の結果
+          （次の投票のOpenから。型B違反者・払いきれなかった者・
+          AUTO COMMITもここに入る。ラウンドの終わりを待たない）
+        - round_results: これまでの全ラウンドの結果（次のラウンドのOpenから。
+          ラウンド最後の投票の公示もvotesキーに含まれる）
+        既存の last_vote_result・last_round_result は互換のため残す
+        （bots/follow_bot.pyが読む。llm/prompt_builder.pyはサイクル4.2で
+        別途対応）。
         """
         last_vote = self._last_vote_outcome
         last_round = self._last_round_outcome
@@ -915,16 +1012,7 @@ class Game:
             "consecutive_ties": self._consecutive_ties,
             "initial_loans": {pid: p.initial_loan for pid, p in sorted(self.players.items())},
             "public_ranks_history": dict(self._public_ranks_history),
-            "last_vote_result": None if last_vote is None else {
-                "round_num": last_vote.round_num,
-                "vote_num": last_vote.vote_num,
-                "result": last_vote.result,
-                "yes_ids": last_vote.yes_ids,
-                "no_ids": last_vote.no_ids,
-                "eliminated_ids": last_vote.eliminated_ids,
-                "remaining_ids": last_vote.remaining_ids,
-                "minority_side": last_vote.minority_side.value if last_vote.minority_side else None,
-            },
+            "last_vote_result": None if last_vote is None else self._vote_result_view(last_vote),
             "last_round_result": None if last_round is None else {
                 "round_num": last_round.round_num,
                 "aborted": last_round.aborted,
@@ -934,7 +1022,13 @@ class Game:
                 "auto_commit_ids": last_round.auto_commit_ids,
                 "type_b_violator_ids": last_round.type_b_violator_ids,
                 "payment_shortfall_ids": last_round.payment_shortfall_ids,
+                "round_settlement_shortfall_ids": last_round.round_settlement_shortfall_ids,
             },
+            "round_contract_counts": list(self._round_turn_contract_counts),
+            "round_vote_results": [
+                self._vote_result_view(o) for o in self._round_vote_outcomes
+            ],
+            "round_results": [self._round_result_view(r) for r in self.round_summaries],
         }
 
         if for_player_id is not None:
