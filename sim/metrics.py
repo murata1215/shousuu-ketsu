@@ -429,14 +429,13 @@ def type_b_break_value_estimate(games: list[dict], config: Any) -> dict:
     入るので、損=retry_avg。全体平均は、各割れ方の「少数派の人数」
     （6対6は12人）で重み付けする。
 
-    人間側の机上計算との突き合わせ結果（V1_seed1_n1000.json、2026-10-10):
-    得の平均は 1,955,126.75（人間側1,955,127、差0.25円）とほぼ完全に一致
-    したが、損の平均は本関数で1,957,792円前後になり、人間側の1,945,283円
-    とは一致しなかった（差約12,500円・0.6%）。損の重み付け（決着時は
-    occurrence×少数派人数、同数時はoccurrence×12）を変えて何通りか試したが
-    いずれも一致せず、原因は特定できなかった。ここでは本関数の計算方法を
-    明記したうえで、両方の数字を報告書に残す（合わせにいかない、CLAUDE.md
-    の方針）。
+    サイクル4.2 E3: 最初の投票が12対0（全員一致）だったラウンドの12人は、
+    損の集計の対象から外す（重みのtieの回数は6対6の回数だけにする。
+    retry_avg自体は6対6と12対0を合わせた平均のまま変えない。12対0は
+    全員が同じ側なので「多数派でなかった人」が存在せず、損の計算の
+    対象にする意味がないため）。この直し方で人間側の机上計算
+    （1,958,853円・24,054人ぶん、V1_seed1_n1000.json基準）と突き合わせる。
+    一致しない場合は合わせにいかず、報告書に差を記録する（CLAUDE.mdの方針）。
     """
     ext_fee = config.extension_fee
     gain_by_k: dict[int, list[int]] = defaultdict(list)
@@ -481,7 +480,10 @@ def type_b_break_value_estimate(games: list[dict], config: Any) -> dict:
     total_rounds = sum(split_counts.values())
 
     occurrence = {k: split_counts.get((12 - k, k), 0) for k in (1, 2, 3, 4, 5)}
-    tie_occurrence = split_counts.get((6, 6), 0) + split_counts.get((12, 0), 0)
+    unanimous_occurrence = split_counts.get((12, 0), 0)
+    # 損の重み付けは6対6の回数だけを使う（E3: 12対0は損の計算対象から外す。
+    # retry_avg自体は6対6と12対0を合わせた平均のまま変えない）
+    tie_occurrence = split_counts.get((6, 6), 0)
 
     gain_destination = {
         5: retry_avg, 4: gain_avg.get(5, 0.0), 3: gain_avg.get(4, 0.0),
@@ -526,5 +528,8 @@ def type_b_break_value_estimate(games: list[dict], config: Any) -> dict:
         "gain_by_split": {_SPLIT_LABELS[k]: gain_destination[k] for k in gain_destination},
         "gain_overall": gain_overall,
         "loss_overall": loss_overall,
+        "loss_person_count": loss_weight_total,
+        "unanimous_occurrence": unanimous_occurrence,
+        "tie_occurrence": tie_occurrence,
         "penalty_estimates": penalty_estimates,
     }

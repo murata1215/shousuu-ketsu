@@ -9,6 +9,9 @@ V1〜V10（シナリオごとに見るべき指標が大きく異なる）に合
 書き換えた。
 """
 
+import json
+from pathlib import Path
+
 import pytest
 
 from sim.metrics import (
@@ -16,6 +19,8 @@ from sim.metrics import (
     type_b_pact_stats,
 )
 from sim.scenarios import GROUP_A, GROUP_B, GROUP_C, HUB_GROUPS, SCENARIO_KEYS, config_for
+
+_V1_N1000_PATH = Path(__file__).resolve().parent.parent / "data" / "sim_v0_4" / "V1_seed1_n1000.json"
 
 GROUP_SCENARIOS = ["V2", "V3g2", "V3g3", "V3g5", "V3g6", "V4", "V5", "V6"]
 TYPE_B_SCENARIOS = ["V8keep_pen100", "V8keep_pen300", "V8keep_pen500",
@@ -149,6 +154,25 @@ def test_type_b_break_value_estimate_structure() -> None:
         for k in ("1000000", "3000000", "5000000")
     ]
     assert nets[0] > nets[1] > nets[2]
+
+
+@pytest.mark.skipif(not _V1_N1000_PATH.exists(), reason="保存データdata/sim_v0_4/未配置（gitignore対象）")
+def test_type_b_break_value_estimate_excludes_unanimous_from_loss() -> None:
+    """
+    サイクル4.2 E3: 12対0（全員一致）は損の計算から外す。loss_person_countは
+    決着分の少数派人数合計＋6対6の人数合計（12対0は含めない）になり、
+    保存済みの実データ（V1_seed1_n1000.json）では人間側の机上計算
+    （損の平均1,958,853円・24,054人ぶん）と一致する（CLAUDE.mdの方針で、
+    一致しない場合でも合わせにいかず差を報告する）。
+    """
+    raw = json.loads(_V1_N1000_PATH.read_text(encoding="utf-8"))
+    result = type_b_break_value_estimate(raw["games"], config_for("V1"))
+
+    assert result["total_rounds"] == 4000
+    assert result["unanimous_occurrence"] == 2  # 4,000ラウンド中2回
+    assert result["loss_person_count"] == 24_054
+    # 人間側1,958,853円との差は1円未満（丸め誤差の範囲）
+    assert abs(result["loss_overall"] - 1_958_853) < 1.0
 
 
 def test_v5_all_three_groups_always_tie_6_against_6_and_abort() -> None:
