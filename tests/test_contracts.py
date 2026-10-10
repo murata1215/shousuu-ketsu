@@ -85,7 +85,7 @@ def test_validate_terms_rejects_past_round() -> None:
     terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_a_payment",
               "round_num": 2, "details": {"amount": 100_000}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=3, vote_num=1, num_rounds=4)
-    assert error is not None and "range" in error
+    assert error is not None and "range" in error.message_en
 
 
 def test_validate_terms_rejects_past_vote_in_current_round() -> None:
@@ -93,7 +93,7 @@ def test_validate_terms_rejects_past_vote_in_current_round() -> None:
     terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_b_vote",
               "round_num": 2, "vote_num": 1, "details": {"vote": "YES"}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=2, vote_num=3, num_rounds=4)
-    assert error is not None and "past" in error
+    assert error is not None and "past" in error.message_en
 
 
 def test_validate_terms_allows_future_vote_in_current_round() -> None:
@@ -117,7 +117,7 @@ def test_validate_terms_rejects_non_party_obligor_or_counterparty() -> None:
     terms = [{"obligor": "P01", "counterparty": "P99", "ob_type": "type_a_payment",
               "round_num": 2, "details": {"amount": 100_000}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07", "P99"}, round_num=1, vote_num=1, num_rounds=4)
-    assert error is not None and "party" in error
+    assert error is not None and "party" in error.message_en
 
 
 def test_validate_terms_allows_in_minority_target_not_a_party() -> None:
@@ -137,7 +137,7 @@ def test_validate_terms_type_a_rejects_vote_num() -> None:
     terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_a_payment",
               "round_num": 2, "vote_num": 1, "details": {"amount": 100_000}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
-    assert error is not None and "vote_num" in error
+    assert error is not None and "vote_num" in error.message_en
 
 
 def test_validate_terms_type_b_requires_vote_num() -> None:
@@ -145,7 +145,7 @@ def test_validate_terms_type_b_requires_vote_num() -> None:
     terms = [{"obligor": "P01", "counterparty": "P07", "ob_type": "type_b_vote",
               "round_num": 2, "details": {"vote": "YES"}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
-    assert error is not None and "vote_num" in error
+    assert error is not None and "vote_num" in error.message_en
 
 
 def test_validate_terms_wins_round_accepts_share_percent_for_self() -> None:
@@ -185,7 +185,7 @@ def test_validate_terms_rejects_both_amount_and_share_percent() -> None:
               "details": {"amount": 100_000, "share_percent": 50, "condition_type": "wins_round",
                            "condition": {"target_player": "P01"}}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
-    assert error is not None and "exclusive" in error
+    assert error is not None and "exclusive" in error.message_en
 
 
 def test_validate_terms_share_percent_out_of_range() -> None:
@@ -205,7 +205,7 @@ def test_validate_terms_wins_round_rejects_vote_num() -> None:
               "details": {"amount": 100_000, "condition_type": "wins_round",
                            "condition": {"target_player": "P01"}}}]
     error = validate_terms(terms, {"P01", "P07"}, {"P01", "P07"}, round_num=1, vote_num=1, num_rounds=4)
-    assert error is not None and "vote_num" in error
+    assert error is not None and "vote_num" in error.message_en
 
 
 # ---------------------------------------------------------------------------

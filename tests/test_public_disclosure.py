@@ -14,6 +14,7 @@ from engine.game import Game
 from engine.models import (
     BroadcastAction, ContractProposeAction, DmAction, TransferAction, Vote,
 )
+from llm.reasons import reject_reason_ja
 from tests.helpers import (
     FailingCommitAgent, ScriptedAgent, VisibleStateRecordingAgent, make_roster,
 )
@@ -346,6 +347,40 @@ def test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty()
 
     by_turn = _negotiate_snapshots_by_key(recorder)
     assert by_turn[(2, 1, 1)]["messages"] == []  # R2に入ったらR1の会話は渡らない
+
+
+def test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only() -> None:
+    """
+    #57: 手持ちを超える送金をした、次の手番 → 本人に渡す文面に、不成立の理由
+    が日本語の文で入っている。ほかのプレイヤーに渡す文面には入っていない
+
+    （v0.4.2 §11.7 #2。エンジンが返す理由は英語の短い文で、AIに渡す文面には
+    入っていなかった不具合の再発防止。日本語化は llm/reasons.py が担う）
+    """
+    agents = make_roster({}, num_players=12)
+    agents["P01"].negotiate_actions[(1, 1, 1)] = TransferAction(
+        player_id="P01", to="P02", amount=50_000_000,  # 手持ち（初期借入額）を大きく超える
+    )
+    p01_recorder = VisibleStateRecordingAgent(agents["P01"])
+    agents["P01"] = p01_recorder
+    p03_recorder = VisibleStateRecordingAgent(agents["P03"])
+    agents["P03"] = p03_recorder
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=57, logger=EventLogger())
+    game.run()
+
+    p01_by_turn = _negotiate_snapshots_by_key(p01_recorder)
+    p03_by_turn = _negotiate_snapshots_by_key(p03_recorder)
+
+    error = p01_by_turn[(1, 1, 2)]["my_last_action_error"]
+    assert error is not None
+    ja_text = reject_reason_ja(error)
+    assert ja_text is not None
+    assert all(ord(ch) < 128 for ch in ja_text) is False  # 日本語の文字を含む
+    assert "Insufficient cash" not in ja_text  # 英語の理由文は入れない
+
+    assert p03_by_turn[(1, 1, 2)]["my_last_action_error"] is None  # ほかのプレイヤーには渡らない
 
 
 # ---------------------------------------------------------------------------

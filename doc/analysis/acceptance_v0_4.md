@@ -3,13 +3,15 @@
 仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_2.md` §12.3 の57件すべてに
 対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 （`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48はエンジンの範囲外
-（出題AI・履歴ファイル）のため、サイクル4.0・4.1時点では理由つきでskipして
-いたが、サイクル4.2で実装した（下記注2を参照）。
+（出題AI・履歴ファイル）のため、理由つきでskipしている（サイクル4.2の
+`llm/questions.py`対応で解消する。下記注2を参照）。
 #51〜#54はサイクル4.1で追加された（v0.4.1 §11.6 #8。§8.1「公示をプレイヤーに
 渡す形」の確認）。#55・#56はサイクル4.2で追加された（v0.4.2 §11.7 #4。
-§9.4「ラウンドの中は投票をまたいで会話を引き継ぐ」の確認）。#57も
-サイクル4.2で追加された（同#4。§7.5「不成立の理由を日本語の文で本人にだけ
-渡す」の確認）。
+§9.4「ラウンドの中は投票をまたいで会話を引き継ぐ」の確認。engine/game.pyの
+修正は実装済み）。#57も同#4で追加され実装済み（§7.5「不成立の理由を
+日本語の文で本人にだけ渡す」の確認。engine/actions.py::RejectReason・
+engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
+対応）。
 
 | # | 場面（仕様書の表現） | pytest関数 | 状態 |
 | --- | --- | --- | --- |
@@ -69,12 +71,11 @@
 | 54 | 形式に合わない提案をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_54_rejection_reason_only_to_proposer` | 合格 |
 | 55 | R1V2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_55_round_conversation_carries_across_votes` | 合格 |
 | 56 | R1の終わりの振り返り。R2V1の交渉中 | `tests/test_public_disclosure.py::test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty` | 合格 |
-| 57 | 手持ちを超える送金をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only`（予定。サイクル4.2作業中） | **作業中（下記注3）** |
+| 57 | 手持ちを超える送金をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only` | 合格 |
 
 ## 集計
 
-- 合格: 54件（#1〜#54）＋ #55・#56
-- 作業中: #57（下記注3。不成立の理由を日本語化する対応と合わせてサイクル4.2内で実装する）
+- 合格: 57件（#1〜#57）
 - skip（理由つき、サイクル4.2内で実装予定）: #47・#48 の2件
 - 1件も省いていない（#1〜#57がすべて表に存在する）
 
@@ -100,8 +101,9 @@ docstringとpytest関数名だけをこの経緯に合わせて更新した
 - #47（出題AIの呼び出し失敗→予備リストから直近30問を避けて24問を選ぶ）と
   #48（試合で使った質問だけを履歴ファイルに追記する）は、出題AIの呼び出し・
   予備質問リストの拡張（60問以上）・`data/question_history.jsonl`への
-  追記という、いずれも`llm/questions.py`の責務であり、このサイクルの範囲
-  （エンジンと受け入れテストまで）の外にある。
+  追記という、いずれも`llm/questions.py`の責務である。サイクル4.0・4.1
+  時点ではエンジン側の作業（受け入れテストまで）しか範囲にしておらず、
+  本サイクル（4.2）の`llm/questions.py`対応で解消する。
 - エンジン側が持つべき最小限の役割（「24問を受け取り、投票ごとに順に
   1問使う」）は実装・確認済み（`engine/game.py`の`questions_per_game`検証・
   `_question_cursor`・`on_question_published`フック）。#48の前段にあたる
@@ -110,7 +112,26 @@ docstringとpytest関数名だけをこの経緯に合わせて更新した
   で確認している。
 - `llm/questions.py`自体のテスト（`tests/test_questions.py`、24件）は
   v0.3の値（QUESTION_COUNT=12・直近10問）のままで全て合格しており、
-  v0.4の値（24問・直近30問）への変更はサイクル4.2で行う。
+  v0.4の値（24問・直近30問）への変更も本サイクルの`llm/questions.py`対応で
+  行う。
+
+## 注3: #57（不成立の理由の日本語化）の実装方法
+
+- エンジンは理由の**コード**を持ち、日本語の**文面**は`llm/`側に置く
+  （ルールの識別はエンジン、言い回しは文面層、という役割分担）。
+- `engine/actions.py::RejectReason`（16種）・`engine/contracts.py::
+  TermRejectReason`（26種）を新設した。`ActionResult`に`reason_code`・
+  `reason_params`を足し、`engine/contracts.py::validate_terms`の戻り値を
+  `str | None`から`TermRejection`（NamedTuple、code・params・message_en）に
+  変えた。既存の`reason`（英語の短い文）はイベントログ・観戦者向けに
+  そのまま残した。
+- `visible_state["my_last_action_error"]`は、これまでの英語の文字列から
+  `{"code": str, "params": dict, "message_en": str}`の辞書に変わった
+  （`is None`/`is not None`で判定している既存テストはそのまま通る）。
+- `llm/reasons.py::reject_reason_ja(err)`が、このコードから日本語の文を
+  作る。未知のコードを渡すとKeyErrorで落ちる設計にし、理由コードを足した
+  のに日本語テンプレートを書き忘れた場合に機械的に検出する
+  （`tests/test_reasons.py::test_every_reject_reason_has_japanese`）。
 
 ## 既存エンジンテストとの関係
 

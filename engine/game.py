@@ -128,7 +128,10 @@ class Game:
         vote_num・turnを持つ）"""
         self._round_established_seqs: list[int] = []
         self._current_vote_auto_ids: set[str] = set()
-        self._last_action_error: dict[str, str] = {}
+        self._last_action_error: dict[str, dict[str, Any]] = {}
+        """player_id -> 直前の不成立の理由（§7.5）。
+        {"code": str, "params": dict, "message_en": str} の形（サイクル4.2。
+        日本語の文面への変換はllm/reasons.py::reject_reason_jaが行う）"""
 
         self._round_vote_outcomes: list[VoteOutcome] = []
         """現在のラウンドで終わった投票（§8.1: 次の投票のOpenから全員に渡す。
@@ -521,7 +524,11 @@ class Game:
                     round_num=round_num, vote_num=vote_num, contracts=self.contracts,
                 )
                 if not result.success:
-                    self._last_action_error[pid] = result.reason or ""
+                    self._last_action_error[pid] = {
+                        "code": result.reason_code,
+                        "params": result.reason_params,
+                        "message_en": result.reason or "",
+                    }
                     self.logger.log(
                         "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
                         visibility="spectator",

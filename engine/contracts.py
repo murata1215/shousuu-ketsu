@@ -26,12 +26,63 @@ v0.3の `engine/contracts.py`（dangou-card流用のB分類を少数決向けに
 提案件数が連番から推測できないようにするため連番にしない）。
 """
 
-from typing import Any
+from enum import Enum
+from typing import Any, NamedTuple
 
 from engine.models import (
     Contract, ContractStatus, Obligation, ObligationType,
     ConditionType, RoundOutcome, VoteOutcome, Vote,
 )
+
+
+class TermRejectReason(str, Enum):
+    """
+    契約の条項（terms）が不正だった理由のコード（§6.1〜§6.4/§9.3）。
+    サイクル4.2で新設（§7.5・受け入れ#57）。`llm/reasons.py::REASON_JA` の
+    キーと1対1で対応する。
+    """
+
+    TERMS_EMPTY = "terms_empty"
+    DETAILS_NOT_DICT = "details_not_dict"
+    OBLIGOR_NOT_PARTY = "obligor_not_party"
+    COUNTERPARTY_NOT_PARTY = "counterparty_not_party"
+    OBLIGOR_EQUALS_COUNTERPARTY = "obligor_equals_counterparty"
+    ROUND_NUM_NOT_INT = "round_num_not_int"
+    ROUND_NUM_OUT_OF_RANGE = "round_num_out_of_range"
+    VOTE_NUM_NOT_POSITIVE_INT = "vote_num_not_positive_int"
+    VOTE_NUM_IN_PAST = "vote_num_in_past"
+    TYPE_A_WITH_VOTE_NUM = "type_a_with_vote_num"
+    TYPE_A_AMOUNT_NOT_POSITIVE = "type_a_amount_not_positive"
+    TYPE_B_REQUIRES_VOTE_NUM = "type_b_requires_vote_num"
+    TYPE_B_VOTE_INVALID = "type_b_vote_invalid"
+    CONDITION_TYPE_INVALID = "condition_type_invalid"
+    WINS_ROUND_WITH_VOTE_NUM = "wins_round_with_vote_num"
+    CONDITION_REQUIRES_VOTE_NUM = "condition_requires_vote_num"
+    AMOUNT_AND_SHARE_BOTH = "amount_and_share_both"
+    AMOUNT_OR_SHARE_MISSING = "amount_or_share_missing"
+    CONDITION_NOT_DICT = "condition_not_dict"
+    MINORITY_SIDE_INVALID = "minority_side_invalid"
+    SHARE_PERCENT_ONLY_WINS_ROUND = "share_percent_only_wins_round"
+    TYPE_C_AMOUNT_NOT_POSITIVE = "type_c_amount_not_positive"
+    TARGET_PLAYER_INVALID = "target_player_invalid"
+    SHARE_PERCENT_TARGET_NOT_SELF = "share_percent_target_not_self"
+    SHARE_PERCENT_OUT_OF_RANGE = "share_percent_out_of_range"
+    UNKNOWN_OB_TYPE = "unknown_ob_type"
+
+
+class TermRejection(NamedTuple):
+    """
+    terms検証の不成立結果（サイクル4.2で `str | None` から変更、§7.5）。
+
+    code: 理由のコード（TermRejectReason）
+    params: 日本語テンプレートに差し込む値（例: {"index": 2, "obligor": "P01"}）。
+        indexは「何本目の義務か」（1始まり、§7.5「どの項目が形式に合わなかったか」）
+    message_en: 英語の短い文（イベントログ・観戦者向け。互換のため残す）
+    """
+
+    code: TermRejectReason
+    params: dict[str, Any]
+    message_en: str
 
 
 def create_contract(
@@ -303,8 +354,8 @@ def vote_constraint_for_vote(
 
 
 def _validate_target_timing(
-    term_round: Any, term_vote: Any, *, round_num: int, vote_num: int, num_rounds: int,
-) -> str | None:
+    term_round: Any, term_vote: Any, *, round_num: int, vote_num: int, num_rounds: int, index: int,
+) -> TermRejection | None:
     """
     対象が「署名した時点の投票と、それより後」であることを検証する（§6.1）
 
@@ -314,24 +365,38 @@ def _validate_target_timing(
         round_num: 現在ラウンド
         vote_num: 現在投票番号
         num_rounds: 総ラウンド数（対象ラウンドの上限）
+        index: 何本目の義務か（1始まり。§7.5の日本語文面用）
 
     Returns:
-        不正ならエラーメッセージ、問題なければNone
+        不正ならTermRejection、問題なければNone
     """
     if not isinstance(term_round, int) or isinstance(term_round, bool):
-        return f"round_num must be an int, got {term_round!r}"
+        return TermRejection(
+            TermRejectReason.ROUND_NUM_NOT_INT, {"index": index, "value": term_round},
+            f"round_num must be an int, got {term_round!r}",
+        )
     if not (round_num <= term_round <= num_rounds):
-        return (
+        return TermRejection(
+            TermRejectReason.ROUND_NUM_OUT_OF_RANGE,
+            {"index": index, "value": term_round, "lo": round_num, "hi": num_rounds},
             f"round_num {term_round} is out of range ({round_num}..{num_rounds}); "
-            "past rounds are not allowed"
+            "past rounds are not allowed",
         )
     if term_vote is not None:
         if not isinstance(term_vote, int) or isinstance(term_vote, bool) or term_vote < 1:
-            return f"vote_num must be a positive int, got {term_vote!r}"
+            return TermRejection(
+                TermRejectReason.VOTE_NUM_NOT_POSITIVE_INT, {"index": index, "value": term_vote},
+                f"vote_num must be a positive int, got {term_vote!r}",
+            )
         if term_round == round_num and term_vote < vote_num:
-            return (
+            return TermRejection(
+                TermRejectReason.VOTE_NUM_IN_PAST,
+                {
+                    "index": index, "value": term_vote,
+                    "round_num": round_num, "vote_num": vote_num,
+                },
                 f"vote_num {term_vote} is in the past "
-                f"(current R{round_num}V{vote_num}); past votes are not allowed"
+                f"(current R{round_num}V{vote_num}); past votes are not allowed",
             )
     return None
 
@@ -343,7 +408,7 @@ def validate_terms(
     round_num: int,
     vote_num: int,
     num_rounds: int,
-) -> str | None:
+) -> TermRejection | None:
     """
     契約提案のterms全体を検証する（§6.1〜§6.4/§9.3）
 
@@ -360,12 +425,13 @@ def validate_terms(
         num_rounds: 総ラウンド数（対象ラウンドの上限）
 
     Returns:
-        不正ならエラーメッセージ、問題なければNone
+        不正ならTermRejection（code・params・message_en。§7.5の日本語文面の元データ）、
+        問題なければNone
     """
     if not terms:
-        return "terms must not be empty"
+        return TermRejection(TermRejectReason.TERMS_EMPTY, {}, "terms must not be empty")
 
-    for term in terms:
+    for i, term in enumerate(terms, start=1):
         obligor = term.get("obligor")
         counterparty = term.get("counterparty")
         ob_type = term.get("ob_type")
@@ -373,108 +439,188 @@ def validate_terms(
         term_vote = term.get("vote_num")
         details = term.get("details", {})
         if not isinstance(details, dict):
-            return f"details must be a dict, got {details!r}"
+            return TermRejection(
+                TermRejectReason.DETAILS_NOT_DICT, {"index": i, "value": details},
+                f"details must be a dict, got {details!r}",
+            )
 
         if obligor not in parties:
-            return f"obligor {obligor!r} is not a party of this contract"
+            return TermRejection(
+                TermRejectReason.OBLIGOR_NOT_PARTY, {"index": i, "pid": obligor},
+                f"obligor {obligor!r} is not a party of this contract",
+            )
         if counterparty not in parties:
-            return f"counterparty {counterparty!r} is not a party of this contract"
+            return TermRejection(
+                TermRejectReason.COUNTERPARTY_NOT_PARTY, {"index": i, "pid": counterparty},
+                f"counterparty {counterparty!r} is not a party of this contract",
+            )
         if obligor == counterparty:
-            return "obligor and counterparty must differ"
+            return TermRejection(
+                TermRejectReason.OBLIGOR_EQUALS_COUNTERPARTY, {"index": i, "pid": obligor},
+                "obligor and counterparty must differ",
+            )
 
         if ob_type == ObligationType.TYPE_A_PAYMENT.value:
             if term_vote is not None:
-                return "type_a_payment must not specify vote_num (round_num only, §9.3)"
-            error = _validate_target_timing(
-                term_round, None, round_num=round_num, vote_num=vote_num, num_rounds=num_rounds,
+                return TermRejection(
+                    TermRejectReason.TYPE_A_WITH_VOTE_NUM, {"index": i},
+                    "type_a_payment must not specify vote_num (round_num only, §9.3)",
+                )
+            rejection = _validate_target_timing(
+                term_round, None, round_num=round_num, vote_num=vote_num,
+                num_rounds=num_rounds, index=i,
             )
-            if error:
-                return error
+            if rejection:
+                return rejection
             amount = details.get("amount")
             if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-                return f"type_a_payment amount must be a positive int, got {amount!r}"
+                return TermRejection(
+                    TermRejectReason.TYPE_A_AMOUNT_NOT_POSITIVE, {"index": i, "value": amount},
+                    f"type_a_payment amount must be a positive int, got {amount!r}",
+                )
 
         elif ob_type == ObligationType.TYPE_B_VOTE.value:
             if term_vote is None:
-                return "type_b_vote requires vote_num (§9.3)"
-            error = _validate_target_timing(
-                term_round, term_vote, round_num=round_num, vote_num=vote_num, num_rounds=num_rounds,
+                return TermRejection(
+                    TermRejectReason.TYPE_B_REQUIRES_VOTE_NUM, {"index": i},
+                    "type_b_vote requires vote_num (§9.3)",
+                )
+            rejection = _validate_target_timing(
+                term_round, term_vote, round_num=round_num, vote_num=vote_num,
+                num_rounds=num_rounds, index=i,
             )
-            if error:
-                return error
+            if rejection:
+                return rejection
             vote = details.get("vote")
             if vote not in (Vote.YES.value, Vote.NO.value):
-                return f"type_b_vote vote must be YES or NO, got {vote!r}"
+                return TermRejection(
+                    TermRejectReason.TYPE_B_VOTE_INVALID, {"index": i, "value": vote},
+                    f"type_b_vote vote must be YES or NO, got {vote!r}",
+                )
 
         elif ob_type == ObligationType.TYPE_C_CONDITIONAL.value:
             condition_type = details.get("condition_type")
             if condition_type not in {c.value for c in ConditionType}:
-                return (
+                return TermRejection(
+                    TermRejectReason.CONDITION_TYPE_INVALID, {"index": i, "value": condition_type},
                     f"Invalid type_c_conditional condition_type: {condition_type!r} "
-                    f"(valid: {', '.join(c.value for c in ConditionType)})"
+                    f"(valid: {', '.join(c.value for c in ConditionType)})",
                 )
 
             is_round_level = condition_type == ConditionType.WINS_ROUND.value
             if is_round_level and term_vote is not None:
-                return "wins_round must not specify vote_num (round_num only, §9.3)"
+                return TermRejection(
+                    TermRejectReason.WINS_ROUND_WITH_VOTE_NUM, {"index": i},
+                    "wins_round must not specify vote_num (round_num only, §9.3)",
+                )
             if not is_round_level and term_vote is None:
-                return f"{condition_type} requires vote_num (§9.3)"
-            error = _validate_target_timing(
+                return TermRejection(
+                    TermRejectReason.CONDITION_REQUIRES_VOTE_NUM,
+                    {"index": i, "condition_type": condition_type},
+                    f"{condition_type} requires vote_num (§9.3)",
+                )
+            rejection = _validate_target_timing(
                 term_round, None if is_round_level else term_vote,
-                round_num=round_num, vote_num=vote_num, num_rounds=num_rounds,
+                round_num=round_num, vote_num=vote_num, num_rounds=num_rounds, index=i,
             )
-            if error:
-                return error
+            if rejection:
+                return rejection
 
             amount = details.get("amount")
             share_percent = details.get("share_percent")
             if amount is not None and share_percent is not None:
-                return "amount and share_percent are mutually exclusive (§6.4)"
+                return TermRejection(
+                    TermRejectReason.AMOUNT_AND_SHARE_BOTH, {"index": i},
+                    "amount and share_percent are mutually exclusive (§6.4)",
+                )
             if amount is None and share_percent is None:
-                return "type_c_conditional requires amount or share_percent"
+                return TermRejection(
+                    TermRejectReason.AMOUNT_OR_SHARE_MISSING, {"index": i},
+                    "type_c_conditional requires amount or share_percent",
+                )
 
             condition = details.get("condition")
             if not isinstance(condition, dict):
-                return f"type_c_conditional condition must be a dict, got {condition!r}"
+                return TermRejection(
+                    TermRejectReason.CONDITION_NOT_DICT, {"index": i, "value": condition},
+                    f"type_c_conditional condition must be a dict, got {condition!r}",
+                )
 
             if condition_type == ConditionType.MINORITY_SIDE.value:
                 side = condition.get("side")
                 if side not in (Vote.YES.value, Vote.NO.value):
-                    return f"minority_side condition.side must be YES or NO, got {side!r}"
+                    return TermRejection(
+                        TermRejectReason.MINORITY_SIDE_INVALID, {"index": i, "value": side},
+                        f"minority_side condition.side must be YES or NO, got {side!r}",
+                    )
                 if share_percent is not None:
-                    return "share_percent is only allowed for wins_round (§6.4)"
+                    return TermRejection(
+                        TermRejectReason.SHARE_PERCENT_ONLY_WINS_ROUND,
+                        {"index": i, "condition_type": condition_type},
+                        "share_percent is only allowed for wins_round (§6.4)",
+                    )
                 if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-                    return f"type_c_conditional amount must be a positive int, got {amount!r}"
+                    return TermRejection(
+                        TermRejectReason.TYPE_C_AMOUNT_NOT_POSITIVE, {"index": i, "value": amount},
+                        f"type_c_conditional amount must be a positive int, got {amount!r}",
+                    )
 
             elif condition_type == ConditionType.IN_MINORITY.value:
                 target_player = condition.get("target_player")
                 if target_player not in valid_player_ids:
-                    return f"Invalid type_c_conditional condition.target_player: {target_player!r}"
+                    return TermRejection(
+                        TermRejectReason.TARGET_PLAYER_INVALID,
+                        {"index": i, "condition_type": condition_type, "value": target_player},
+                        f"Invalid type_c_conditional condition.target_player: {target_player!r}",
+                    )
                 if share_percent is not None:
-                    return "share_percent is only allowed for wins_round (§6.4)"
+                    return TermRejection(
+                        TermRejectReason.SHARE_PERCENT_ONLY_WINS_ROUND,
+                        {"index": i, "condition_type": condition_type},
+                        "share_percent is only allowed for wins_round (§6.4)",
+                    )
                 if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-                    return f"type_c_conditional amount must be a positive int, got {amount!r}"
+                    return TermRejection(
+                        TermRejectReason.TYPE_C_AMOUNT_NOT_POSITIVE, {"index": i, "value": amount},
+                        f"type_c_conditional amount must be a positive int, got {amount!r}",
+                    )
 
             elif condition_type == ConditionType.WINS_ROUND.value:
                 target_player = condition.get("target_player")
                 if target_player not in valid_player_ids:
-                    return f"Invalid type_c_conditional condition.target_player: {target_player!r}"
+                    return TermRejection(
+                        TermRejectReason.TARGET_PLAYER_INVALID,
+                        {"index": i, "condition_type": condition_type, "value": target_player},
+                        f"Invalid type_c_conditional condition.target_player: {target_player!r}",
+                    )
                 if share_percent is not None:
                     if target_player != obligor:
-                        return (
+                        return TermRejection(
+                            TermRejectReason.SHARE_PERCENT_TARGET_NOT_SELF,
+                            {"index": i, "obligor": obligor, "value": target_player},
                             "share_percent is only allowed when target_player "
-                            "is the obligor themselves (§6.4)"
+                            "is the obligor themselves (§6.4)",
                         )
                     if (
                         not isinstance(share_percent, int)
                         or isinstance(share_percent, bool)
                         or not (1 <= share_percent <= 100)
                     ):
-                        return f"share_percent must be an int in 1..100, got {share_percent!r}"
+                        return TermRejection(
+                            TermRejectReason.SHARE_PERCENT_OUT_OF_RANGE,
+                            {"index": i, "value": share_percent},
+                            f"share_percent must be an int in 1..100, got {share_percent!r}",
+                        )
                 else:
                     if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
-                        return f"type_c_conditional amount must be a positive int, got {amount!r}"
+                        return TermRejection(
+                            TermRejectReason.TYPE_C_AMOUNT_NOT_POSITIVE, {"index": i, "value": amount},
+                            f"type_c_conditional amount must be a positive int, got {amount!r}",
+                        )
         else:
-            return f"Unknown ob_type: {ob_type!r}"
+            return TermRejection(
+                TermRejectReason.UNKNOWN_OB_TYPE, {"index": i, "value": ob_type},
+                f"Unknown ob_type: {ob_type!r}",
+            )
 
     return None
