@@ -11,7 +11,9 @@
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.game import Game
-from engine.models import ContractProposeAction, DmAction, TransferAction, Vote
+from engine.models import (
+    BroadcastAction, ContractProposeAction, DmAction, TransferAction, Vote,
+)
 from tests.helpers import (
     FailingCommitAgent, ScriptedAgent, VisibleStateRecordingAgent, make_roster,
 )
@@ -256,6 +258,94 @@ def test_last_action_error_clears_on_next_action_even_if_it_is_a_pass() -> None:
     by_turn = _negotiate_snapshots_by_key(recorder)
     assert by_turn[(1, 1, 2)]["my_last_action_error"] is not None  # turn1の不成立がまだ見える
     assert by_turn[(1, 1, 3)]["my_last_action_error"] is None  # turn2でpassした後は消える
+
+
+def test_acceptance_55_round_conversation_carries_across_votes() -> None:
+    """
+    #55: R1V2の交渉中 → R1V1の交渉での全体発言と、自分が当事者のDMが、
+    投票番号と巡がわかる形で本人に渡っている。他人どうしのDMは入っていない
+
+    （v0.4.2 §11.7 #1。サイクル4.1まではエンジンが投票ごとに会話を消しており、
+    V1の会話がV2の本人に渡っていなかった）
+    """
+    votes_by_vote = {
+        (1, 1): {f"P{i:02d}": Vote.YES for i in range(1, 8)}
+        | {f"P{i:02d}": Vote.NO for i in range(8, 13)},  # 7対5、NO側5人が残ってV2へ
+    }
+    agents = make_roster(votes_by_vote, num_players=12)
+    agents["P07"].negotiate_actions[(1, 1, 1)] = BroadcastAction(
+        player_id="P07", message="全員YESで合わせよう",
+    )
+    agents["P04"].negotiate_actions[(1, 1, 1)] = DmAction(
+        player_id="P04", to="P07", message="乗る",
+    )
+    agents["P09"].negotiate_actions[(1, 1, 1)] = DmAction(
+        player_id="P09", to="P10", message="他人には見えないはずの内緒話",
+    )
+
+    recorder = VisibleStateRecordingAgent(agents["P04"])
+    agents["P04"] = recorder
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=55, logger=EventLogger())
+    game.run()
+
+    by_turn = _negotiate_snapshots_by_key(recorder)
+    v2_messages = by_turn[(1, 2, 1)]["messages"]
+
+    broadcasts = [m for m in v2_messages if m["type"] == "broadcast"]
+    assert len(broadcasts) == 1
+    assert broadcasts[0]["from"] == "P07"
+    assert broadcasts[0]["vote_num"] == 1
+    assert broadcasts[0]["turn"] == 1
+
+    dms = [m for m in v2_messages if m["type"] == "dm"]
+    assert len(dms) == 1  # P04が当事者のDMだけ。P09→P10は入らない
+    assert dms[0]["from"] == "P04" and dms[0]["to"] == "P07"
+    assert dms[0]["vote_num"] == 1 and dms[0]["turn"] == 1
+
+
+def test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty() -> None:
+    """
+    #56: R1の終わりの振り返り。R2V1の交渉中 → 振り返りには、R1の全部の投票
+    の会話が渡っている。R2V1では、R1の会話は渡っていない
+
+    （v0.4.2 §11.7 #1。ラウンドの終わりの振り返りには最後の投票の会話しか
+    渡っていなかった不具合の再発防止）
+    """
+    votes_by_vote = {
+        (1, 1): {f"P{i:02d}": Vote.YES for i in range(1, 8)}
+        | {f"P{i:02d}": Vote.NO for i in range(8, 13)},  # 7対5、NO側5人がV2へ
+        (1, 2): {
+            "P08": Vote.YES, "P09": Vote.YES, "P10": Vote.YES,
+            "P11": Vote.NO, "P12": Vote.NO,
+        },  # 3対2、NO側2人が残ってラウンド終了
+    }
+    agents = make_roster(votes_by_vote, num_players=12)
+    agents["P08"].negotiate_actions[(1, 1, 1)] = BroadcastAction(
+        player_id="P08", message="V1の発言",
+    )
+    agents["P10"].negotiate_actions[(1, 2, 1)] = BroadcastAction(
+        player_id="P10", message="V2の発言",
+    )
+
+    recorder = VisibleStateRecordingAgent(agents["P08"])
+    agents["P08"] = recorder
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=2)
+    game = Game(config=config, agents=agents, seed=56, logger=EventLogger(), stop_after_round=2)
+    game.run()
+
+    r1_round_num, r1_reflect_state = recorder.reflect_snapshots[0]
+    assert r1_round_num == 1
+    r1_broadcasts = {
+        (m["vote_num"], m["turn"], m["message"])
+        for m in r1_reflect_state["messages"] if m["type"] == "broadcast"
+    }
+    assert r1_broadcasts == {(1, 1, "V1の発言"), (2, 1, "V2の発言")}
+
+    by_turn = _negotiate_snapshots_by_key(recorder)
+    assert by_turn[(2, 1, 1)]["messages"] == []  # R2に入ったらR1の会話は渡らない
 
 
 # ---------------------------------------------------------------------------

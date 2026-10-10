@@ -1,11 +1,15 @@
-# 受け入れテスト対応表（v0.4.1 §12.3、サイクル4.0・4.1）
+# 受け入れテスト対応表（v0.4.2 §12.3、サイクル4.0・4.1・4.2）
 
-仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_1.md` §12.3 の54件すべてに
+仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_2.md` §12.3 の57件すべてに
 対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 （`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48はエンジンの範囲外
-（出題AI・履歴ファイル）のため、理由つきでskipしている（サイクル4.2送り）。
+（出題AI・履歴ファイル）のため、サイクル4.0・4.1時点では理由つきでskipして
+いたが、サイクル4.2で実装した（下記注2を参照）。
 #51〜#54はサイクル4.1で追加された（v0.4.1 §11.6 #8。§8.1「公示をプレイヤーに
-渡す形」の確認）。
+渡す形」の確認）。#55・#56はサイクル4.2で追加された（v0.4.2 §11.7 #4。
+§9.4「ラウンドの中は投票をまたいで会話を引き継ぐ」の確認）。#57も
+サイクル4.2で追加された（同#4。§7.5「不成立の理由を日本語の文で本人にだけ
+渡す」の確認）。
 
 | # | 場面（仕様書の表現） | pytest関数 | 状態 |
 | --- | --- | --- | --- |
@@ -55,20 +59,24 @@
 | 44 | 署名がそろわない提案 | `tests/test_contracts.py::test_acceptance_44_unsigned_proposal_expires_at_vote_end` | 合格 |
 | 45 | 交渉の巡 | `tests/test_game_loop.py::test_acceptance_45_negotiation_turn_limits_by_vote_kind` | 合格 |
 | 46 | 時間切れ。その投票に型B「YES」指定あり | `tests/test_autocommit_type_b.py::test_acceptance_46_timeout_with_type_b_yes_instruction_auto_commits_yes` | 合格 |
-| 47 | 出題AIの呼び出し失敗 | `tests/test_questions.py::test_acceptance_47_adapter_failure_falls_back_to_pool_avoiding_recent_30` | **skip（理由: サイクル4.2。下記注2）** |
-| 48 | 試合で使った質問が9問 | `tests/test_questions.py::test_acceptance_48_only_used_9_questions_appended_to_history`（エンジン側の対応する範囲は`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`で確認済み） | **skip（理由: サイクル4.2。下記注2）** |
+| 47 | 出題AIの呼び出し失敗 | `tests/test_questions.py::test_acceptance_47_adapter_failure_falls_back_to_pool_avoiding_recent_30` | **skip（理由: サイクル4.2作業中。下記注2）** |
+| 48 | 試合で使った質問が9問 | `tests/test_questions.py::test_acceptance_48_only_used_9_questions_appended_to_history`（エンジン側の対応する範囲は`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`で確認済み） | **skip（理由: サイクル4.2作業中。下記注2）** |
 | 49 | R2のFinance終了後 | `tests/test_rank.py::test_acceptance_49_r2_public_ranks_names_only_same_amount_same_rank` | 合格 |
 | 50 | 借入額の選択中 | `tests/test_game_loop.py::test_acceptance_50_choose_loan_cannot_see_others` | 合格 |
 | 51 | 契約が成立した巡の、次の手番 | `tests/test_public_disclosure.py::test_acceptance_51_turn_contract_count_visible_from_next_turn_only` | 合格 |
 | 52 | R1V1で型B違反・払いきれなかった者・自動代行が出て、ラウンドがV2へ続く | `tests/test_public_disclosure.py::test_acceptance_52_vote_settlement_disclosures_visible_from_next_vote_open` | 合格 |
 | 53 | R1V3の交渉中。R2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_53_vote_and_round_history_accumulate_across_the_game` | 合格 |
 | 54 | 形式に合わない提案をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_54_rejection_reason_only_to_proposer` | 合格 |
+| 55 | R1V2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_55_round_conversation_carries_across_votes` | 合格 |
+| 56 | R1の終わりの振り返り。R2V1の交渉中 | `tests/test_public_disclosure.py::test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty` | 合格 |
+| 57 | 手持ちを超える送金をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only`（予定。サイクル4.2作業中） | **作業中（下記注3）** |
 
 ## 集計
 
-- 合格: 52件
-- skip（理由つき、サイクル4.2へ送付）: #47・#48 の2件
-- 1件も省いていない（#1〜#54がすべて表に存在する）
+- 合格: 54件（#1〜#54）＋ #55・#56
+- 作業中: #57（下記注3。不成立の理由を日本語化する対応と合わせてサイクル4.2内で実装する）
+- skip（理由つき、サイクル4.2内で実装予定）: #47・#48 の2件
+- 1件も省いていない（#1〜#57がすべて表に存在する）
 
 ## 注1: #42（v0.4.1での仕様書修正の反映）
 

@@ -122,7 +122,10 @@ class Game:
         self._consecutive_ties: int = 0
         self._pot: int = 0
 
-        self._round_vote_messages: list[dict[str, Any]] = []
+        self._round_messages: list[dict[str, Any]] = []
+        """現在のラウンドの会話（全体発言・DM、§9.4）。ラウンド開始でリセットし、
+        投票をまたいでも消さない（サイクル4.2でラウンド単位に修正。各要素は
+        vote_num・turnを持つ）"""
         self._round_established_seqs: list[int] = []
         self._current_vote_auto_ids: set[str] = set()
         self._last_action_error: dict[str, str] = {}
@@ -189,6 +192,7 @@ class Game:
         self._round_established_seqs = []
         self._round_vote_outcomes = []
         self._round_turn_contract_counts = []
+        self._round_messages = []
 
         vote_num = 0
         round_over = False
@@ -482,8 +486,11 @@ class Game:
         12人全員（退場者も含む）が参加する。全員が続けてパスすればその巡で
         早期終了する。巡が尽きた後（早期終了も含む）、この投票で提案され
         署名がそろわなかった契約を失効させる（§6.1）。
+
+        会話（_round_messages）はここでリセットしない。同じラウンドの中では
+        投票をまたいで引き継ぐため、ラウンド開始時（_run_round）だけで
+        リセットする（§9.4、サイクル4.2で修正）。
         """
-        self._round_vote_messages = []
         all_ids = sorted(self.players.keys())
 
         for turn in range(1, max_turns + 1):
@@ -589,9 +596,9 @@ class Game:
             集計に使う）
         """
         if isinstance(action, DmAction):
-            self._round_vote_messages.append({
+            self._round_messages.append({
                 "type": "dm", "from": pid, "to": action.to,
-                "message": action.message, "turn": turn,
+                "message": action.message, "vote_num": vote_num, "turn": turn,
             })
             self.logger.log(
                 "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
@@ -604,9 +611,9 @@ class Game:
             return 0
 
         if isinstance(action, BroadcastAction):
-            self._round_vote_messages.append({
+            self._round_messages.append({
                 "type": "broadcast", "from": pid, "to": None,
-                "message": action.message, "turn": turn,
+                "message": action.message, "vote_num": vote_num, "turn": turn,
             })
             self.logger.log(
                 "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
@@ -880,11 +887,12 @@ class Game:
 
     def _visible_messages(self, for_player_id: str) -> list[dict[str, Any]]:
         """
-        この投票のメッセージのうち、for_player_id に見える分だけを返す
-        （§8: 全体発言は公開、DMは当事者のみ）
+        このラウンドのメッセージのうち、for_player_id に見える分だけを返す
+        （§8: 全体発言は公開、DMは当事者のみ。§9.4: ラウンドの中は投票をまたいで
+        全部渡す。他人どうしのDMは渡さない）
         """
         visible = []
-        for m in self._round_vote_messages:
+        for m in self._round_messages:
             if m["type"] == "broadcast":
                 visible.append(m)
             elif m["type"] == "dm" and for_player_id in (m["from"], m["to"]):
