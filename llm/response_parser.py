@@ -22,8 +22,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from engine.models import (
-    Action, BroadcastAction, ContractProposeAction, ContractSignAction,
-    DmAction, PassAction, RepayAction, TransferAction, Vote, VoteCommitAction,
+    Action, BroadcastAction, ConditionType, ContractProposeAction, ContractSignAction,
+    DmAction, ObligationType, PassAction, RepayAction, TransferAction, Vote, VoteCommitAction,
 )
 from llm.constants import MEMORY_MAX_LENGTH
 
@@ -198,8 +198,32 @@ def parse_loan_amount(text: str) -> int:
     return int(amount)
 
 
-_VALID_OB_TYPES = {"type_a_payment", "type_b_vote", "type_c_conditional"}
-_VALID_CONDITION_TYPES = {"minority_side", "in_minority"}
+_VALID_OB_TYPES = {t.value for t in ObligationType}
+# engine/models.py::ConditionTypeから導出する（§9.3、二重管理をやめる。
+# サイクル4.2bでwins_roundを追加したが、ここで個別に書くと足し忘れが起きるため）
+_VALID_CONDITION_TYPES = {t.value for t in ConditionType}
+
+# vote_numが term 自体（details の外）に必要なcondition_type（§9.3:
+# type_b_vote・minority_side・in_minorityはround_num+vote_num、
+# type_a_payment・wins_roundはround_numだけを指定する）
+_CONDITION_TYPES_REQUIRING_VOTE_NUM = {"minority_side", "in_minority"}
+
+
+def _validate_vote_num_if_present(i: int, term: dict[str, Any]) -> None:
+    """
+    vote_numが指定されている場合、正の整数であることだけを検査する（§9.3）
+
+    必須かどうか・round_num/vote_numの範囲はこのparser層には現在の投票番号の
+    文脈が無いため判定しない（engine/contracts.py::validate_terms が担当する）。
+    """
+    if "vote_num" not in term:
+        return
+    vote_num = term["vote_num"]
+    if not isinstance(vote_num, int) or isinstance(vote_num, bool):
+        raise ParseError(
+            f"terms[{i}]のvote_numが整数ではありません",
+            "vote_numは1以上の整数で指定してください",
+        )
 
 
 def _validate_type_c_term_shape(i: int, term: dict[str, Any]) -> None:
@@ -207,33 +231,62 @@ def _validate_type_c_term_shape(i: int, term: dict[str, Any]) -> None:
     type_c_conditional termの形（details/condition の構造）だけを検証する（§6.4/§9.3）
 
     round_num範囲・target_playerの実在性チェックは、このparser層には
-    現在ラウンド・プレイヤー一覧の文脈が無いため行わない
-    （engine/actions.py::validate_action が担当する）。
+    現在の投票・プレイヤー一覧の文脈が無いため行わない
+    （engine/contracts.py::validate_terms が担当する）。
+
+    サイクル4.2bでv0.4の§9.3に合わせ、wins_round（target_playerが義務者自身の
+    場合のみamountの代わりにshare_percentを指定できる）を足した。
     """
     details = term.get("details")
     if not isinstance(details, dict):
         raise ParseError(
             f"terms[{i}]のdetailsが辞書ではありません",
-            'type_c_conditionalのdetailsは{"amount": int, "condition_type": '
-            '"minority_side"|"in_minority", "condition": {...}} の形式である必要があります',
+            'type_c_conditionalのdetailsは{"amount"または"share_percent", "condition_type": '
+            '"minority_side"|"in_minority"|"wins_round", "condition": {...}} の形式である必要があります',
         )
-    amount = details.get("amount")
-    if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+    has_amount = "amount" in details
+    has_share = "share_percent" in details
+    if has_amount and has_share:
         raise ParseError(
-            f"terms[{i}]のtype_c_conditional amountが不正: {amount!r}",
-            "amountは正の整数である必要があります",
+            f"terms[{i}]にamountとshare_percentの両方があります",
+            "amountとshare_percentはどちらか一方だけを指定してください",
         )
+    if not has_amount and not has_share:
+        raise ParseError(
+            f"terms[{i}]にamountもshare_percentもありません",
+            "amountまたはshare_percentのどちらか一方を指定してください",
+        )
+    if has_amount:
+        amount = details.get("amount")
+        if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
+            raise ParseError(
+                f"terms[{i}]のtype_c_conditional amountが不正: {amount!r}",
+                "amountは正の整数である必要があります",
+            )
+    else:
+        share_percent = details.get("share_percent")
+        if not isinstance(share_percent, int) or isinstance(share_percent, bool) \
+                or not (1 <= share_percent <= 100):
+            raise ParseError(
+                f"terms[{i}]のshare_percentが不正: {share_percent!r}",
+                "share_percentは1〜100の整数である必要があります",
+            )
     condition_type = details.get("condition_type")
     if condition_type not in _VALID_CONDITION_TYPES:
         raise ParseError(
             f"terms[{i}]のcondition_typeが無効: {condition_type!r}",
             f"有効なcondition_type: {', '.join(sorted(_VALID_CONDITION_TYPES))}",
         )
+    if has_share and condition_type != "wins_round":
+        raise ParseError(
+            f"terms[{i}]でshare_percentを{condition_type}に使っています",
+            "share_percentが使えるのはwins_roundだけです",
+        )
     condition = details.get("condition")
     if not isinstance(condition, dict):
         raise ParseError(
             f"terms[{i}]のconditionが辞書ではありません",
-            "conditionは{side}（minority_side）または{target_player}（in_minority）の"
+            "conditionは{side}（minority_side）または{target_player}（in_minority/wins_round）の"
             "辞書である必要があります",
         )
     if condition_type == "minority_side":
@@ -243,12 +296,17 @@ def _validate_type_c_term_shape(i: int, term: dict[str, Any]) -> None:
                 f"terms[{i}]のcondition.sideが無効: {side!r}",
                 'condition_type=minority_sideにはcondition={"side": "YES"|"NO"}が必要です',
             )
-    else:  # in_minority
+    else:  # in_minority / wins_round
         if not isinstance(condition.get("target_player"), str) or not condition.get("target_player"):
             raise ParseError(
                 f"terms[{i}]のconditionにtarget_playerが不足",
-                'condition_type=in_minorityにはcondition={"target_player": "P03"}が必要です',
+                f'condition_type={condition_type}にはcondition={{"target_player": "P03"}}が必要です',
             )
+    if condition_type in _CONDITION_TYPES_REQUIRING_VOTE_NUM and "vote_num" not in term:
+        raise ParseError(
+            f"terms[{i}]にvote_numがありません",
+            f"{condition_type}にはvote_numが必要です（round_numと両方を指定する）",
+        )
 
 
 def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
@@ -344,6 +402,7 @@ def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
                     f"terms[{i}]のround_numが整数ではありません",
                     "round_numは整数で指定してください",
                 )
+            _validate_vote_num_if_present(i, term)
             details = term.get("details")
             if ob_type == "type_a_payment":
                 if not isinstance(details, dict) or not isinstance(details.get("amount"), int) \
@@ -358,6 +417,11 @@ def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
                     raise ParseError(
                         f"terms[{i}]のtype_b_vote detailsが不正",
                         'type_b_voteのdetailsは{"vote": "YES"|"NO"} の形式である必要があります',
+                    )
+                if "vote_num" not in term:
+                    raise ParseError(
+                        f"terms[{i}]にvote_numがありません",
+                        "type_b_voteにはvote_numが必要です（round_numと両方を指定する）",
                     )
             else:  # type_c_conditional
                 _validate_type_c_term_shape(i, term)

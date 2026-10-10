@@ -60,9 +60,13 @@ class LLMLogger:
         finish_reason: str | None = None,
         unit_price_input: float = 0.0,
         unit_price_output: float = 0.0,
+        vote_num: int | None = None,
     ) -> None:
         """
         1回のLLMコールを記録し、即時にファイルへ追記する
+
+        vote_num: 投票番号（v0.4新設、§1.1）。loan/post_game等、投票の外で
+            起きる呼び出しはNone。
         """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -71,6 +75,7 @@ class LLMLogger:
             "model_id": model_id,
             "phase": phase,
             "round_num": round_num,
+            "vote_num": vote_num,
             "turn": turn,
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
@@ -164,12 +169,13 @@ class LLMLogger:
         turn: int | None, system_prompt: str, user_prompt: str,
         reason: str, estimated_cost_usd: float, player_spent_usd: float,
         game_spent_usd: float, per_player_cap_usd: float, game_cap_usd: float,
+        vote_num: int | None = None,
     ) -> None:
-        """API未実行の予算ブロックを通常callと区別して記録する。"""
+        """API未実行の予算ブロックを通常callと区別して記録する。vote_numは§1.1。"""
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
             "player_id": player_id, "model_id": model_id, "phase": phase,
-            "round_num": round_num, "turn": turn, "system_prompt": system_prompt,
+            "round_num": round_num, "vote_num": vote_num, "turn": turn, "system_prompt": system_prompt,
             "user_prompt": user_prompt, "response_text": "", "input_tokens": 0,
             "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0,
             "api_called": False, "budget_blocked": True, "budget_reason": reason,
@@ -191,6 +197,7 @@ class LLMLogger:
         self, *, player_id: str, model_id: str, phase: str, round_num: int,
         turn: int | None, system_prompt: str, user_prompt: str,
         error: str, error_type: str, elapsed_ms: float,
+        vote_num: int | None = None,
     ) -> None:
         """
         API呼び出しそのものが失敗した（AdapterError・想定外の例外・タイムアウト等）
@@ -200,12 +207,12 @@ class LLMLogger:
         ここはAPIを実際に呼んだが失敗した場合に使う。api_called=True,
         budget_blocked=False のまま error/error_type を埋めることで、
         要約コマンド（scripts/summarize_trial.py）が「時間切れ」「無効な応答」を
-        api_called×error_type から正しく集計できるようにする。
+        api_called×error_type から正しく集計できるようにする。vote_numは§1.1。
         """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
             "player_id": player_id, "model_id": model_id, "phase": phase,
-            "round_num": round_num, "turn": turn, "system_prompt": system_prompt,
+            "round_num": round_num, "vote_num": vote_num, "turn": turn, "system_prompt": system_prompt,
             "user_prompt": user_prompt, "response_text": "", "input_tokens": 0,
             "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0,
             "api_called": True, "budget_blocked": False,
@@ -221,7 +228,7 @@ class LLMLogger:
 
     def log_invalid_response(
         self, *, player_id: str, model_id: str, phase: str, round_num: int,
-        turn: int | None, reason: str,
+        turn: int | None, reason: str, vote_num: int | None = None,
     ) -> None:
         """
         APIは応答したが解析に失敗した（無効な応答）ことを記録する軽量マーカー行
@@ -232,12 +239,12 @@ class LLMLogger:
         （scripts/summarize_trial.py）が無効な応答の件数を`invalid_response`
         フラグの有無だけで席ごとに集計できる」ことだけを目的に追加する
         軽量な別行であり、`log_call()`の記録内容・呼び出し回数カウントには
-        影響しない。
+        影響しない。vote_numは§1.1。
         """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
             "player_id": player_id, "model_id": model_id, "phase": phase,
-            "round_num": round_num, "turn": turn, "invalid_response": True,
+            "round_num": round_num, "vote_num": vote_num, "turn": turn, "invalid_response": True,
             "reason": reason, "api_called": True, "budget_blocked": False, "cost_usd": 0.0,
         }
         with self._lock:

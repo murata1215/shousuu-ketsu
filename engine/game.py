@@ -315,11 +315,22 @@ class Game:
 
         3段構えはrun()の_phase_reflectと同じ。失敗は記録のみで試合結果には
         一切影響しない。
+
+        サイクル4.2b: 承認済み決定9（§7.6・§8.1）により、本人の分だけでなく
+        これまでの全ラウンドの結果（round_results）と、全員の最終順位・
+        最終資産（all_final_ranks・all_final_assets）も渡す。全員の最終順位と
+        最終資産は、最終ラウンドの終了後に全員へ公開される情報であり
+        （ルール全文に足した行(b)参照）、本人のものだけに絞る理由がない。
         """
         ranks = player_ops.assets_ranking(self.players.values())
         pending = sorted(self.agents)
 
         round_results = [self._round_result_view(r) for r in self.round_summaries]
+        all_final_assets = dict(sorted(result.final_assets.items()))
+        all_final_ranks = [
+            {"player_id": pid, "rank": r.rank, "tied": r.tied}
+            for pid, r in sorted(ranks.items(), key=lambda kv: (kv[1].rank, kv[0]))
+        ]
 
         def _call(pid: str) -> dict[str, Any] | None:
             r = ranks[pid]
@@ -331,6 +342,8 @@ class Game:
                 # Openが無いので試合後の振り返りに渡す。round_summariesは
                 # この時点でR4まで埋まっている。
                 "round_results": round_results,
+                "all_final_ranks": all_final_ranks,
+                "all_final_assets": all_final_assets,
             }
             try:
                 return self.agents[pid].post_game_reflect(context)
@@ -1012,8 +1025,11 @@ class Game:
         - round_results: これまでの全ラウンドの結果（次のラウンドのOpenから。
           ラウンド最後の投票の公示もvotesキーに含まれる）
         既存の last_vote_result・last_round_result は互換のため残す
-        （bots/follow_bot.pyが読む。llm/prompt_builder.pyはサイクル4.2で
-        別途対応）。
+        （bots/follow_bot.pyが読む。llm/prompt_builder.pyサイクル4.2bで
+        round_vote_results・round_resultsを上位集合として使う形に対応済み）。
+
+        サイクル4.2bで足した1項目: negotiation_max_turns（交渉の巡の上限、
+        §7.2。文面層が見出しの1行目に出すため）。
         """
         last_vote = self._last_vote_outcome
         last_round = self._last_round_outcome
@@ -1026,6 +1042,10 @@ class Game:
             "remaining_ids": sorted(self._remaining_ids),
             "eliminated_ids": sorted(self._eliminated_ids),
             "consecutive_ties": self._consecutive_ties,
+            # サイクル4.2b: 交渉の巡の上限（§7.2）。判定（V1→first／直前が決着→next／
+            # やり直し→retry）は_negotiation_max_turns()が唯一の持ち主であり、文面層
+            # （llm/prompt_builder.py）で同じ判定を再実装しない（CLAUDE.md落とし穴④）。
+            "negotiation_max_turns": self._negotiation_max_turns(vote_num, self._round_vote_outcomes),
             "initial_loans": {pid: p.initial_loan for pid, p in sorted(self.players.items())},
             "public_ranks_history": dict(self._public_ranks_history),
             "last_vote_result": None if last_vote is None else self._vote_result_view(last_vote),

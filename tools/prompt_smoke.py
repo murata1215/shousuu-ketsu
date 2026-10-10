@@ -51,18 +51,18 @@ def main() -> None:
     model_info = get_model(args.model)
     config = GameConfig.default_12()
 
-    # R1開始直後の状態を再現する（StubAgent全員・AIを呼ばない範囲でGameを進める）。
+    # R1V1開始直後の状態を再現する（StubAgent全員・AIを呼ばない範囲でGameを進める）。
     agents = {f"P{i:02d}": StubAgent() for i in range(1, config.num_players + 1)}
     game = Game(config, agents, seed=1)
     game._setup()
     game.current_round = 1
-    game._phase_open(1)
-    visible_state = game._build_visible_state(1, for_player_id=args.player_id)
+    game._phase_open(1, 1)
+    visible_state = game._build_visible_state(1, 1, for_player_id=args.player_id)
     player_state = game.players[args.player_id]
 
     include_anonymization = model_info.adapter_type != "devrelay_http"
     system = build_system_prompt(args.player_id, config, include_anonymization=include_anonymization)
-    user = build_negotiation_prompt(player_state, 1, 1, visible_state, config)
+    user = build_negotiation_prompt(player_state, 1, 1, 1, visible_state, config)
 
     estimated = worst_case_cost(model_info, system, user, DEFAULT_MAX_TOKENS)
     print(f"モデル: {args.model} ({model_info.model_id})")

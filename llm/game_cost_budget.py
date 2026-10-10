@@ -57,7 +57,7 @@ class GameCostBudget:
         return self.abort_on_block and bool(self.blocks)
 
     def reserve(self, player_id: str, amount_usd: float, *, round_num: int,
-                phase: str, turn: int | None = None) -> Reservation:
+                phase: str, turn: int | None = None, vote_num: int | None = None) -> Reservation:
         with self._lock:
             player_total = self.player_spent_usd.get(player_id, 0.0) + self.player_pending_usd.get(player_id, 0.0) + amount_usd
             game_total = self.game_spent_usd + self.game_pending_usd + amount_usd
@@ -77,7 +77,7 @@ class GameCostBudget:
                     "game_cost_cap_usd": self.game_cap_usd, "api_called": False,
                 }
                 self.blocks.append(block)
-                self._event_logger.log("LLM_BUDGET_BLOCKED", round_num, phase, data=block)
+                self._event_logger.log("LLM_BUDGET_BLOCKED", round_num, phase, data=block, vote_num=vote_num)
                 raise BudgetBlockedError(reason)
             self.player_pending_usd[player_id] = self.player_pending_usd.get(player_id, 0.0) + amount_usd
             self.game_pending_usd += amount_usd

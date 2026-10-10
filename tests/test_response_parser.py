@@ -92,7 +92,7 @@ def test_parse_contract_propose_type_a():
 def test_parse_contract_propose_type_b_vote():
     terms = [
         {"obligor": "P07", "counterparty": "P01", "ob_type": "type_b_vote",
-         "round_num": 5, "details": {"vote": "NO"}},
+         "round_num": 5, "vote_num": 1, "details": {"vote": "NO"}},
     ]
     _, action = parse_response(
         _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
@@ -100,9 +100,21 @@ def test_parse_contract_propose_type_b_vote():
     assert isinstance(action, ContractProposeAction)
 
 
+def test_parse_contract_propose_type_b_vote_requires_vote_num():
+    terms = [
+        {"obligor": "P07", "counterparty": "P01", "ob_type": "type_b_vote",
+         "round_num": 5, "details": {"vote": "NO"}},
+    ]
+    with pytest.raises(ParseError):
+        parse_response(
+            _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+        )
+
+
 def test_parse_contract_propose_type_c_minority_side():
     terms = [
         {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "vote_num": 1,
          "details": {"amount": 500000, "condition_type": "minority_side", "condition": {"side": "YES"}}},
     ]
     _, action = parse_response(
@@ -114,12 +126,71 @@ def test_parse_contract_propose_type_c_minority_side():
 def test_parse_contract_propose_type_c_in_minority():
     terms = [
         {"obligor": "P07", "counterparty": "P01", "ob_type": "type_c_conditional", "round_num": 5,
+         "vote_num": 1,
          "details": {"amount": 500000, "condition_type": "in_minority", "condition": {"target_player": "P03"}}},
     ]
     _, action = parse_response(
         _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
     )
     assert isinstance(action, ContractProposeAction)
+
+
+def test_parse_contract_propose_type_c_wins_round_with_amount():
+    terms = [
+        {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "details": {"amount": 500000, "condition_type": "wins_round", "condition": {"target_player": "P01"}}},
+    ]
+    _, action = parse_response(
+        _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+    )
+    assert isinstance(action, ContractProposeAction)
+
+
+def test_parse_contract_propose_type_c_wins_round_with_share_percent():
+    terms = [
+        {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "details": {"share_percent": 25, "condition_type": "wins_round", "condition": {"target_player": "P01"}}},
+    ]
+    _, action = parse_response(
+        _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+    )
+    assert isinstance(action, ContractProposeAction)
+
+
+def test_parse_contract_propose_type_c_wins_round_rejects_vote_num_requirement_free():
+    """wins_roundはvote_numが無くても通る（type_a/wins_roundはround_numだけ指定する、§9.3）"""
+    terms = [
+        {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "details": {"amount": 100, "condition_type": "wins_round", "condition": {"target_player": "P01"}}},
+    ]
+    _, action = parse_response(
+        _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+    )
+    assert isinstance(action, ContractProposeAction)
+
+
+def test_parse_contract_propose_type_c_share_percent_rejects_non_wins_round():
+    terms = [
+        {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "vote_num": 1,
+         "details": {"share_percent": 25, "condition_type": "minority_side", "condition": {"side": "YES"}}},
+    ]
+    with pytest.raises(ParseError):
+        parse_response(
+            _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+        )
+
+
+def test_parse_contract_propose_type_c_amount_and_share_percent_mutually_exclusive():
+    terms = [
+        {"obligor": "P01", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 5,
+         "details": {"amount": 100, "share_percent": 25, "condition_type": "wins_round",
+                      "condition": {"target_player": "P01"}}},
+    ]
+    with pytest.raises(ParseError):
+        parse_response(
+            _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+        )
 
 
 def test_parse_contract_sign():
