@@ -32,6 +32,7 @@ class EventLogger:
         self,
         fixed_timestamp: str | None = None,
         output_path: str | Path | None = None,
+        on_event: Any = None,
     ) -> None:
         """
         Args:
@@ -40,9 +41,14 @@ class EventLogger:
             output_path: 逐次追記先のファイルパス。
                          指定時は log() ごとに即時追記+flush。
                          Noneなら従来通りメモリ保持のみ（ディスク書き込みしない）。
+            on_event: 記録のたびに呼ばれるフック（サイクル4.2b新設。引数は
+                記録済みのGameEvent 1件）。`scripts/llm_trial.py`の途中経過
+                表示（投票が決まるたびの1行）用途。例外は握りつぶし、
+                試合を止めない。Noneなら何もしない（既定）。
         """
         self._events: list[GameEvent] = []
         self._fixed_timestamp = fixed_timestamp
+        self._on_event = on_event
         # 逐次書き込み: output_path 指定時のみ有効
         # シミュレーション経路（simulate.py等）では output_path=None で
         # 生成されるため、余分なファイルI/Oは発生しない。
@@ -111,6 +117,12 @@ class EventLogger:
                     self._file.flush()
                 except Exception:
                     pass  # 書き込みエラーでもゲーム続行
+
+        if self._on_event is not None:
+            try:
+                self._on_event(event)
+            except Exception:  # noqa: BLE001 — 画面表示用フックの例外で試合を止めない
+                pass
 
         return event
 

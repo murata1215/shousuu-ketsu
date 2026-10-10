@@ -1,23 +1,28 @@
 """
-少数決 AI試合 実行スクリプト（サイクル2.0新設）
+少数決 AI試合 実行スクリプト（サイクル2.0新設、サイクル4.2bでv0.4対応）
 
 質問生成 → 借入額の選択（全員同時）→ 各ラウンド（Open→Negotiation→Commit→
-Settlement→Finance→振り返り）→ 試合後の振り返り、までを1本で回す。
+Settlement→Finance→振り返りを1〜6回の投票ぶん繰り返す）→ 試合後の振り返り、
+までを1本で回す。既定はL12R4V6（12人・4ラウンド・最大6投票）。
 gentei-janken `scripts/llm_trial.py`（B分類）の骨格（ロスター指定・preflight・
 予算キャップ・JSONLログ）をコピーし、少数決向けに差し替えた（veteran機能は
 少数決の仕様に存在しないため全削除、CLAUDE.md過去の落とし穴③の回避）。
+
+v0.4の記録は `logs/llm_v0_4/` に出す（既定）。公開中のビューアは`logs/llm/`
+（v0.3の記録）を読んでおり、サイクル4.3で対応するまでv0.4の記録を混ぜない。
 
 使用方法:
     # 事前の疎通確認だけ（APIを1コールずつ叩いて成否・所要時間を表にする）
     uv run python scripts/llm_trial.py --roster "L1,L1,L1,L1,L1,L1,L1,L1,L1,L1,L1,L1" \\
         --seed 1 --preflight-only
 
-    # 小さな通し確認（4席・1ラウンド・交渉2巡）
+    # 小さな通し確認（4席・R1だけ・交渉の巡をラウンド最初2/決着後2/やり直し1に縮小）
     uv run python scripts/llm_trial.py --roster "L3,L6,DR_HAIKU,DR_LUNA" \\
-        --seed 2001 --num-rounds 1 --stop-after-round 1 --negotiation-max-turns 2 \\
+        --seed 2001 --stop-after-round 1 \\
+        --negotiation-max-turns-first 2 --negotiation-max-turns-next 2 --negotiation-max-turns-retry 1 \\
         --parallel 2 --per-seat-cap-usd 0.05 --game-cap-usd 0.12 --game-id smoke4_2001
 
-    # 12席・1ラウンドの本走り（人間がフォアグラウンドで起動する想定）
+    # 12席・R1だけの本走り（人間がフォアグラウンドで起動する想定）
     uv run python scripts/llm_trial.py \\
         --roster "DR_FABLE,DR_OPUS,DR_SONNET5,DR_SOL,DR_TERRA,DR_LUNA,L1,L2,L3,L4,L5,L6" \\
         --seed 2001 --stop-after-round 1 --parallel 4 \\
@@ -217,8 +222,10 @@ def _print_preflight_table(results: list[dict[str, Any]]) -> None:
 class ProgressPrinter:
     """
     LLMAgent.on_call_done フック経由で、呼び出しごとに1行ずつ画面へ出す
-    （ラウンド・手番・席・所要時間・失敗。並列実行時でも行が交差しないよう
+    （ラウンド・投票・手番・席・所要時間・失敗。並列実行時でも行が交差しないよう
     ロックで直列化する）。
+
+    サイクル4.2bでvote_numを行に足した（例: `[P07] R1V2 T3 negotiation …`）。
     """
 
     def __init__(self) -> None:
@@ -226,10 +233,11 @@ class ProgressPrinter:
         self.fail_counts: dict[str, int] = {}
 
     def __call__(self, info: dict[str, Any]) -> None:
+        vote_part = f"V{info['vote_num']}" if info.get("vote_num") is not None else ""
         turn_part = f" T{info['turn']}" if info.get("turn") is not None else ""
         status = "OK" if info["ok"] else f"FAIL({info['error_type']})"
         line = (
-            f"  [{info['player_id']}] R{info['round_num']}{turn_part} {info['phase']:<10} "
+            f"  [{info['player_id']}] R{info['round_num']}{vote_part}{turn_part} {info['phase']:<10} "
             f"{info['elapsed_ms']:>7.0f}ms {status}"
         )
         with self._lock:
@@ -238,6 +246,79 @@ class ProgressPrinter:
             # 出力先がファイル（nohup等）でもブロックバッファに溜め込まず
             # 1行ごとにすぐ書き出す（サイクル2.1。長い試合をtail -fで追えるように）。
             print(line, flush=True)
+
+
+_VOTE_RESULT_LABEL = {"decisive": "決着", "retry": "やり直し", "abort": "打ち切り"}
+
+
+class VoteProgressPrinter:
+    """
+    EventLogger.on_event フック経由で、投票が決まるたびに1行だけ画面へ出す
+    （サイクル4.2b新設）。
+
+    例:
+      R1V2 決着 YES3対NO2 退場: P01,P04,P09
+      R1V2 やり直し YES6対NO6 連続1回 延長料60万
+      R1V3 打ち切り YES6対NO6 山1,560万をR2へ持ち越し
+
+    「打ち切り」は、そのラウンドの持ち越し/消滅の額がROUND_RESOLVED
+    （投票のすぐ後に続く）で確定するまで1行の表示を待ち合わせる。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_votes: dict[str, str] = {}
+        self._pending_abort: tuple[int, int, int, int] | None = None
+
+    def __call__(self, event: Any) -> None:
+        if event.event_type == "VOTE_REVEALED":
+            with self._lock:
+                self._last_votes = event.data.get("votes") or {}
+            return
+        if event.event_type == "VOTE_RESOLVED":
+            self._on_vote_resolved(event)
+            return
+        if event.event_type == "ROUND_RESOLVED":
+            self._on_round_resolved(event)
+            return
+
+    def _on_vote_resolved(self, event: Any) -> None:
+        d = event.data
+        with self._lock:
+            votes = self._last_votes
+        yes_n = sum(1 for v in votes.values() if v == "YES")
+        no_n = sum(1 for v in votes.values() if v == "NO")
+        result = d["result"]
+        label = _VOTE_RESULT_LABEL[result]
+        if result == "decisive":
+            elim = ",".join(d.get("eliminated_ids") or [])
+            print(f"R{event.round_num}V{event.vote_num} {label} YES{yes_n}対NO{no_n} 退場: {elim}", flush=True)
+        elif result == "retry":
+            ext_man = (d.get("extension_fee_collected") or 0) // 10_000
+            print(
+                f"R{event.round_num}V{event.vote_num} {label} YES{yes_n}対NO{no_n} "
+                f"連続{d.get('consecutive_ties_after')}回 延長料{ext_man}万", flush=True,
+            )
+        else:  # abort — 持ち越し/消滅の額はROUND_RESOLVEDで分かるまで待つ
+            with self._lock:
+                self._pending_abort = (event.round_num, event.vote_num, yes_n, no_n)
+
+    def _on_round_resolved(self, event: Any) -> None:
+        d = event.data
+        if not d.get("aborted"):
+            return
+        with self._lock:
+            pending = self._pending_abort
+            self._pending_abort = None
+        if pending is None:
+            return
+        round_num, vote_num, yes_n, no_n = pending
+        if d.get("destroyed_pot"):
+            pot_text = f"山{d['destroyed_pot'] // 10_000:,}万は消滅"
+        else:
+            pot_man = (d.get("carryover_out") or 0) // 10_000
+            pot_text = f"山{pot_man:,}万をR{round_num + 1}へ持ち越し"
+        print(f"R{round_num}V{vote_num} 打ち切り YES{yes_n}対NO{no_n} {pot_text}", flush=True)
 
 
 def _enable_line_buffering(stream: Any) -> bool:
@@ -270,14 +351,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=42,
                          help="ゲーム乱数シード。席の割り当て・質問生成の予備選択もこの値から導出する")
     parser.add_argument("--num-rounds", type=int, default=None,
-                         help="ルール上の総ラウンド数。未指定なら12席=12ラウンド・他は4ラウンド")
+                         help="ルール上の総ラウンド数。未指定ならGameConfigの既定（L12R4V6: 4ラウンド）")
     parser.add_argument("--stop-after-round", type=int, default=None,
                          help="ルール上のラウンド数は変えずに、実行だけこのラウンドで打ち切る"
                               "（is_final判定・持ち越し消滅はnum_rounds基準のまま変わらない）")
     parser.add_argument("--negotiation-max-turns", type=int, default=None,
-                         help="交渉の最大巡数を上書きする（既定: GameConfig、通常10）")
+                         help="交渉の最大巡数を3種類（最初/決着後/やり直し）すべて同じ値に上書きする"
+                              "短縮形。個別の--negotiation-max-turns-{first,next,retry}が"
+                              "指定されていればそちらを優先する")
+    parser.add_argument("--negotiation-max-turns-first", type=int, default=None,
+                         help="ラウンド最初の投票（V1）の交渉の最大巡数を上書きする（既定: 10）")
+    parser.add_argument("--negotiation-max-turns-next", type=int, default=None,
+                         help="決着の後の投票の交渉の最大巡数を上書きする（既定: 6）")
+    parser.add_argument("--negotiation-max-turns-retry", type=int, default=None,
+                         help="やり直しの再投票の交渉の最大巡数を上書きする（既定: 3）")
     parser.add_argument("--game-id", type=str, default=None)
-    parser.add_argument("--log-dir", type=str, default="logs/llm")
+    parser.add_argument("--log-dir", type=str, default="logs/llm_v0_4",
+                         help="記録の出力先（既定: logs/llm_v0_4）。logs/llm はv0.3本戦の記録専用"
+                              "のため、サイクル4.3でビューアが対応するまでv0.4の記録を混ぜない")
     parser.add_argument("--per-seat-cap-usd", type=float, default=0.5,
                          help="1席が1試合で使える実績コスト上限（既定: 0.5ドル）")
     parser.add_argument("--game-cap-usd", type=float, default=3.0,
@@ -296,7 +387,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--question-model", type=str, default=None,
                          help="出題AIのモデルキー（既定: GameConfig.question_model = DR_HAIKU）")
     parser.add_argument("--question-history-path", type=str, default=str(DEFAULT_HISTORY_PATH),
-                         help="直近10問の取得元・追記先（既定: data/question_history.jsonl）")
+                         help="直近30問の取得元・追記先（既定: data/question_history.jsonl）")
     return parser
 
 
@@ -313,14 +404,29 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
          "preflight_results"（疎通確認を行った場合のみ）}
     """
     model_keys = parse_roster(args.roster)
+    config_kwargs: dict[str, Any] = {"num_players": len(model_keys)}
     if args.num_rounds is not None:
-        config = GameConfig(num_players=len(model_keys), num_rounds=args.num_rounds)
-    elif len(model_keys) == 12:
-        config = GameConfig.default_12()
-    else:
-        config = GameConfig.dev_small(num_players=len(model_keys))
+        config_kwargs["num_rounds"] = args.num_rounds
+    config = GameConfig(**config_kwargs)
+
+    # 交渉の巡の上限: --negotiation-max-turns は3種類同時指定の短縮形。
+    # 個別の--negotiation-max-turns-{first,next,retry}が指定されていれば
+    # そちらを優先する（CLAUDE.md: 既存の--negotiation-max-turnsは
+    # 存在しないフィールドに書き込んでいて無言で効いていなかったバグを、
+    # 実在する3フィールドへ書き込むよう直した）。
+    turn_updates: dict[str, int] = {}
     if args.negotiation_max_turns is not None:
-        config = config.model_copy(update={"negotiation_max_turns": args.negotiation_max_turns})
+        turn_updates["negotiation_max_turns_first"] = args.negotiation_max_turns
+        turn_updates["negotiation_max_turns_next"] = args.negotiation_max_turns
+        turn_updates["negotiation_max_turns_retry"] = args.negotiation_max_turns
+    if args.negotiation_max_turns_first is not None:
+        turn_updates["negotiation_max_turns_first"] = args.negotiation_max_turns_first
+    if args.negotiation_max_turns_next is not None:
+        turn_updates["negotiation_max_turns_next"] = args.negotiation_max_turns_next
+    if args.negotiation_max_turns_retry is not None:
+        turn_updates["negotiation_max_turns_retry"] = args.negotiation_max_turns_retry
+    if turn_updates:
+        config = config.model_copy(update=turn_updates)
 
     game_id = args.game_id or f"trial_seed{args.seed}_{len(model_keys)}p"
     log_dir = Path(args.log_dir)
@@ -338,7 +444,9 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
         print(f"  {pid}: {seat_models[pid]} ({model_info.model_id})")
     print("---")
 
-    logger = EventLogger(output_path=log_dir / f"{game_id}_events.jsonl")
+    logger = EventLogger(
+        output_path=log_dir / f"{game_id}_events.jsonl", on_event=VoteProgressPrinter(),
+    )
     llm_logger = LLMLogger(log_dir, game_id=game_id)
     game_cost_budget = GameCostBudget(
         per_player_cap_usd=args.per_seat_cap_usd, game_cap_usd=args.game_cap_usd, event_logger=logger,
@@ -389,7 +497,7 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
 
     # --- 質問生成（§5） ---
     if args.questions:
-        questions = load_questions_file(args.questions, expected=config.num_rounds)
+        questions = load_questions_file(args.questions, expected=config.questions_per_game)
         question_info = {"source": "fixed_file", "path": args.questions, "questions": questions}
         print(f"[questions] 固定セット {args.questions} を使用（{len(questions)}問）")
     else:
@@ -412,9 +520,9 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
     )
     print("---")
 
-    def on_question_published(round_num: int, question: str) -> None:
+    def on_question_published(round_num: int, vote_num: int, question: str) -> None:
         append_question(
-            question, game_id=game_id, round_num=round_num,
+            question, game_id=game_id, round_num=round_num, vote_num=vote_num,
             history_path=args.question_history_path,
         )
 
@@ -445,7 +553,7 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
     print(json.dumps({
         "final_ranks": result.final_ranks, "final_assets": result.final_assets,
         "total_interest": result.total_interest,
-        "total_destroyed_carryover": result.total_destroyed_carryover,
+        "total_destroyed_pot": result.total_destroyed_pot,
         "total_forfeited_remainder": result.total_forfeited_remainder,
         "post_game_reflections": result.post_game_reflections,
     }, ensure_ascii=False, indent=2))
