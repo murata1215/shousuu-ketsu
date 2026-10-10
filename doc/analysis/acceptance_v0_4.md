@@ -2,9 +2,8 @@
 
 仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_2.md` §12.3 の57件すべてに
 対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
-（`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48はエンジンの範囲外
-（出題AI・履歴ファイル）のため、理由つきでskipしている（サイクル4.2の
-`llm/questions.py`対応で解消する。下記注2を参照）。
+（`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48は出題AI・履歴ファイル
+（`llm/questions.py`）の対応がサイクル4.2bで完了し、合格になった（下記注2参照）。
 #51〜#54はサイクル4.1で追加された（v0.4.1 §11.6 #8。§8.1「公示をプレイヤーに
 渡す形」の確認）。#55・#56はサイクル4.2で追加された（v0.4.2 §11.7 #4。
 §9.4「ラウンドの中は投票をまたいで会話を引き継ぐ」の確認。engine/game.pyの
@@ -61,8 +60,8 @@ engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 | 44 | 署名がそろわない提案 | `tests/test_contracts.py::test_acceptance_44_unsigned_proposal_expires_at_vote_end` | 合格 |
 | 45 | 交渉の巡 | `tests/test_game_loop.py::test_acceptance_45_negotiation_turn_limits_by_vote_kind` | 合格 |
 | 46 | 時間切れ。その投票に型B「YES」指定あり | `tests/test_autocommit_type_b.py::test_acceptance_46_timeout_with_type_b_yes_instruction_auto_commits_yes` | 合格 |
-| 47 | 出題AIの呼び出し失敗 | `tests/test_questions.py::test_acceptance_47_adapter_failure_falls_back_to_pool_avoiding_recent_30` | **skip（理由: サイクル4.2作業中。下記注2）** |
-| 48 | 試合で使った質問が9問 | `tests/test_questions.py::test_acceptance_48_only_used_9_questions_appended_to_history`（エンジン側の対応する範囲は`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`で確認済み） | **skip（理由: サイクル4.2作業中。下記注2）** |
+| 47 | 出題AIの呼び出し失敗 | `tests/test_questions.py::test_acceptance_47_adapter_failure_falls_back_to_pool_avoiding_recent_30` | 合格 |
+| 48 | 試合で使った質問が9問 | `tests/test_questions.py::test_acceptance_48_only_used_9_questions_appended_to_history`（エンジン側の対応する範囲は`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`で確認済み） | 合格 |
 | 49 | R2のFinance終了後 | `tests/test_rank.py::test_acceptance_49_r2_public_ranks_names_only_same_amount_same_rank` | 合格 |
 | 50 | 借入額の選択中 | `tests/test_game_loop.py::test_acceptance_50_choose_loan_cannot_see_others` | 合格 |
 | 51 | 契約が成立した巡の、次の手番 | `tests/test_public_disclosure.py::test_acceptance_51_turn_contract_count_visible_from_next_turn_only` | 合格 |
@@ -75,8 +74,7 @@ engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 
 ## 集計
 
-- 合格: 57件（#1〜#57）
-- skip（理由つき、サイクル4.2内で実装予定）: #47・#48 の2件
+- 合格: 57件（#1〜#57）。skipは0件
 - 1件も省いていない（#1〜#57がすべて表に存在する）
 
 ## 注1: #42（v0.4.1での仕様書修正の反映）
@@ -96,24 +94,23 @@ v0.4.1 §11.6 #1でこの指摘が仕様書本文に反映され、#42は現在�
 docstringとpytest関数名だけをこの経緯に合わせて更新した
 （`_before_type_a` → `_before_type_c_same_vote`）。
 
-## 注2: #47・#48をskipにした理由
+## 注2: #47・#48（サイクル4.2bで解消）
 
-- #47（出題AIの呼び出し失敗→予備リストから直近30問を避けて24問を選ぶ）と
-  #48（試合で使った質問だけを履歴ファイルに追記する）は、出題AIの呼び出し・
-  予備質問リストの拡張（60問以上）・`data/question_history.jsonl`への
-  追記という、いずれも`llm/questions.py`の責務である。サイクル4.0・4.1
-  時点ではエンジン側の作業（受け入れテストまで）しか範囲にしておらず、
-  本サイクル（4.2）の`llm/questions.py`対応で解消する。
-- エンジン側が持つべき最小限の役割（「24問を受け取り、投票ごとに順に
-  1問使う」）は実装・確認済み（`engine/game.py`の`questions_per_game`検証・
-  `_question_cursor`・`on_question_published`フック）。#48の前段にあたる
-  「実際に使った投票の回数だけ質問が公開される」ことは
-  `tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`
-  で確認している。
-- `llm/questions.py`自体のテスト（`tests/test_questions.py`、24件）は
-  v0.3の値（QUESTION_COUNT=12・直近10問）のままで全て合格しており、
-  v0.4の値（24問・直近30問）への変更も本サイクルの`llm/questions.py`対応で
-  行う。
+サイクル4.0・4.1時点では、#47（出題AIの呼び出し失敗→予備リストから直近30問
+を避けて24問を選ぶ）・#48（試合で使った質問だけを履歴ファイルに追記する）は、
+出題AIの呼び出し・予備質問リストの拡張・`data/question_history.jsonl`への
+追記という`llm/questions.py`の責務のためskipしていた（エンジン側の最小限の
+役割「24問を受け取り、投票ごとに順に1問使う」は実装・確認済みで、#48の前段
+にあたる「実際に使った投票の回数だけ質問が公開される」ことは
+`tests/test_game_loop.py::test_on_question_published_called_only_for_votes_actually_used`
+で確認している）。
+
+サイクル4.2bで`llm/questions.py`をv0.4の値（`QUESTION_COUNT=24`・
+`HISTORY_SIZE=30`）に直し、予備質問リストをYES寄り（`FALLBACK_QUESTIONS_
+YES_LEAN`）・NO寄り（`FALLBACK_QUESTIONS_NO_LEAN`、各30問以上）の2本に分けて
+両方からおよそ半分ずつ補完するようにした。`append_question()`に`vote_num`を
+足し（既存のv0.3形式の行は読める・消さない・書き換えない）、#47・#48を
+`tests/test_questions.py`に実装して合格にした。
 
 ## 注3: #57（不成立の理由の日本語化）の実装方法
 
@@ -135,7 +132,7 @@ docstringとpytest関数名だけをこの経緯に合わせて更新した
 
 ## 既存エンジンテストとの関係
 
-受け入れテスト54件に加えて、エンジンの単体テスト（`test_vote_round.py`・
+受け入れテスト57件に加えて、エンジンの単体テスト（`test_vote_round.py`・
 `test_settlement_v0_4.py`・`test_contracts.py`・`test_event_visibility.py`等）
 と、追加確認3点（保存則・再現性・投票回数の上限、`test_invariants.py`）で
 エンジン全体の整合性を確認している。テスト件数の内訳は devlog を参照。

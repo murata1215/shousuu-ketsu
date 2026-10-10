@@ -1,16 +1,24 @@
 """
 質問生成モジュール（§5）
 
-試合開始前に1回、出題AIへ12問をまとめて生成させる（§5.1）。出題AIには
-直近10問（data/question_history.jsonl の末尾10行）だけを渡し、プレイヤーや
-試合の状況は一切渡さない。
+試合開始前に1回、出題AIへ24問をまとめて生成させる（§5.1、v0.4: 4ラウンド×
+最大6投票=24問）。出題AIには直近30問（data/question_history.jsonl の末尾
+30行）だけを渡し、プレイヤーや試合の状況は一切渡さない。
 
-検査はコードでできるものだけに絞る（§5.3）: 12問あるか／40字以内か／
-禁止語／完全一致の重複（12問どうし、および直近10問と）。「意味が似すぎて
-いるか」はコードで判定せず、出題AI自身への指示に任せる。
+検査はコードでできるものだけに絞る（§5.3）: 24問あるか／40字以内か／
+禁止語／完全一致の重複（24問どうし、および直近30問と）。「意味が似すぎて
+いるか」はコードで判定せず、出題AI自身への指示に任せる。YES寄り/NO寄りの
+偏りも同様にコードでは判定せず、指示文（_build_question_prompt）に
+「およそ半分ずつ」の1行を足すことで出題AI自身に委ねる。
 
-検査に落ちた質問・呼び出し失敗は、内蔵の予備質問リスト（FALLBACK_QUESTIONS、
-36問）から直近10問を避けて補う。試合は止めない（例外を外に出さない）。
+検査に落ちた質問・呼び出し失敗は、内蔵の予備質問リスト（FALLBACK_QUESTIONS_
+YES_LEAN/FALLBACK_QUESTIONS_NO_LEAN、各30問以上）から直近30問を避けて
+両方からおよそ半分ずつ補う。試合は止めない（例外を外に出さない）。
+
+サイクル4.2bでv0.3（12問・直近10問固定）からv0.4（24問・直近30問）へ
+変更した。既存の `data/question_history.jsonl`（v0.3形式、vote_numの無い
+行）は読める（recent_questions()はquestionキーだけを見るため）。既存の行は
+消さない・書き換えない（append_question()は常に追記のみ）。
 
 CLAUDE.md「仕様書に書いていないことを決める必要が出たら一覧にして報告する」:
 「実在の人物」は固有名詞を機械的に網羅できないため、BANNED_WORDSでは
@@ -30,8 +38,12 @@ from pathlib import Path
 from typing import Any
 
 MAX_QUESTION_LEN = 40
-QUESTION_COUNT = 12
-HISTORY_SIZE = 10
+QUESTION_COUNT = 24
+"""1試合の質問数の既定値（§5.1/§10: 4ラウンド×最大6投票=24）。
+generate_questions()にconfigを渡した場合はconfig.questions_per_gameを優先する"""
+HISTORY_SIZE = 30
+"""出題AIに見せる直近N問の既定値（§5.1/§10: 30）。
+generate_questions()にconfigを渡した場合はconfig.recent_questions_windowを優先する"""
 DEFAULT_HISTORY_PATH = Path("data/question_history.jsonl")
 
 # 禁止語（§5.2: 政治・宗教・実在の人物・差別・性・暴力に触れない）。
@@ -44,46 +56,81 @@ BANNED_WORDS: tuple[str, ...] = (
     "戦争", "暴力", "殴る", "殴れ", "虐待", "暴行",
 )
 
-# 予備質問リスト（§5.3: 30問以上）。くだらなくて、誰でも意味が分かり、
+# 予備質問リスト（§5.3: 各30問以上）。くだらなくて、誰でも意味が分かり、
 # 政治・宗教・実在の人物・差別・性・暴力に触れないものだけを収録する。
-FALLBACK_QUESTIONS: tuple[str, ...] = (
+#
+# サイクル4.2bで、「ふつうに考えるとYESと答えたくなる文」と「ふつうに考えると
+# NOと答えたくなる文」の2本に分けた（出題AIへの指示文・予備補完の両方で
+# およそ半分ずつ使うため）。YES寄り/NO寄りの分類はコードで判定せず、
+# リストの作成方針（この文自体の読み心地）で担保する（§5.2と同じ扱い）。
+FALLBACK_QUESTIONS_YES_LEAN: tuple[str, ...] = (
     "カラスの色は黒である",
-    "魚は木に登る",
-    "目玉焼きには醤油である",
-    "宇宙のどこかに宇宙人がいる",
-    "きのこの山よりたけのこの里である",
-    "卵焼きは甘いほうがうまい",
-    "猫は液体である",
-    "月にはうさぎが住んでいる",
-    "ラーメンのスープは最後まで飲む",
-    "傘は折りたたみのほうが便利である",
-    "パンダは意外とこわい",
-    "カレーは一晩置いたほうがうまい",
-    "冷やし中華にマヨネーズは合う",
+    "新しい靴は最初だけ痛い",
     "靴ひもは1日1回はほどける",
-    "エスカレーターでは歩かない",
-    "月曜の朝はいつもより体が重い",
-    "食パンの耳は残す",
-    "ペンギンは泳ぐより歩くほうが速い",
-    "鏡の中の自分は本物より格好いい",
-    "コーヒーは紙コップのほうがうまい",
-    "寝る前のスマホはやめられない",
+    "消しゴムは最後まで使い切れない",
     "自分の寝言は信用できない",
-    "長風呂のほうが得である",
-    "たい焼きは頭から食べる",
+    "雨の匂いは分かる",
+    "月曜の朝はいつもより体が重い",
     "電池は振ると少し復活する",
     "犬は飼い主の顔を覚えている",
-    "ゾウはネズミをこわがる",
     "洗濯物は夜に干しても乾く",
-    "消しゴムは最後まで使い切れない",
-    "自転車のベルはほとんど鳴らさない",
+    "長風呂のほうが得である",
+    "食パンの耳は残す",
+    "枕は低いほうがよく眠れる",
+    "冷やし中華にマヨネーズは合う",
+    "傘は折りたたみのほうが便利である",
+    "寝る前のスマホはやめられない",
+    "たい焼きは頭から食べる",
+    "鉛筆はボールペンより書きやすい",
     "氷は丸いほうが溶けにくい",
     "味噌汁の具は豆腐が一番である",
-    "新しい靴は最初だけ痛い",
-    "鉛筆はボールペンより書きやすい",
-    "枕は低いほうがよく眠れる",
-    "雨の匂いは分かる",
+    "新しい年度は気持ちを切り替えやすい",
+    "雨の日は眠くなりやすい",
+    "財布は小さいほうが使いやすい",
+    "階段は上りより下りのほうが怖い",
+    "歯ブラシは3か月で交換したほうがいい",
+    "冬は布団から出にくい",
+    "自転車は乗り始めが一番ふらつく",
+    "旅行の前日はよく眠れない",
+    "長時間座ると腰が痛くなる",
+    "初めての道は実際より長く感じる",
 )
+
+FALLBACK_QUESTIONS_NO_LEAN: tuple[str, ...] = (
+    "魚は木に登る",
+    "猫は液体である",
+    "月にはうさぎが住んでいる",
+    "パンダは意外とこわい",
+    "ペンギンは泳ぐより歩くほうが速い",
+    "ゾウはネズミをこわがる",
+    "自転車のベルはほとんど鳴らさない",
+    "エスカレーターでは歩かない",
+    "ラーメンのスープは最後まで飲む",
+    "きのこの山よりたけのこの里である",
+    "目玉焼きには醤油である",
+    "卵焼きは甘いほうがうまい",
+    "宇宙のどこかに宇宙人がいる",
+    "コーヒーは紙コップのほうがうまい",
+    "鏡の中の自分は本物より格好いい",
+    "カレーは一晩置いたほうがうまい",
+    "象は実は鳥より軽い",
+    "満月の夜は人の気分が変わる",
+    "右利きのほうが左利きより多才である",
+    "サボテンは水をあげなくても永遠に生きる",
+    "ダチョウは頭を地面に埋めて隠れる",
+    "サメは泳ぎを止めると死んでしまう",
+    "金魚の記憶は3秒しか持たない",
+    "コウモリは目が見えない",
+    "ラクダのこぶには水が入っている",
+    "1円玉は水に浮く",
+    "虹は手で触れられるところまで近づける",
+    "雷は同じ場所に二度落ちない",
+    "ダイヤモンドは燃えない",
+    "ガムは飲み込むと胃の中に何年も残る",
+)
+
+FALLBACK_QUESTIONS: tuple[str, ...] = FALLBACK_QUESTIONS_YES_LEAN + FALLBACK_QUESTIONS_NO_LEAN
+"""YES寄り・NO寄りを合わせた全予備問（既存コード・テストからの参照用）"""
 
 
 def contains_banned_word(question: str) -> bool:
@@ -104,13 +151,21 @@ def is_valid_question(question: Any) -> bool:
 
 
 def _validate_fallback_pool() -> None:
-    """起動時の自己検査: 予備リスト自身が§5.2/§5.3の条件を満たすこと（CLAUDE.md過去の落とし穴③対策の一種）"""
-    if len(FALLBACK_QUESTIONS) < 30:
-        raise AssertionError(
-            f"FALLBACK_QUESTIONS must have at least 30 entries (got {len(FALLBACK_QUESTIONS)})"
-        )
+    """
+    起動時の自己検査: 予備リスト自身が§5.2/§5.3の条件を満たすこと
+    （CLAUDE.md過去の落とし穴③対策の一種）
+
+    YES寄り・NO寄りそれぞれ30問以上、合わせて重複なし、全問が機械判定を通る
+    こと（§5.1のおよそ半分ずつの補完が常に可能であることを保証する）。
+    """
+    for name, pool in (
+        ("FALLBACK_QUESTIONS_YES_LEAN", FALLBACK_QUESTIONS_YES_LEAN),
+        ("FALLBACK_QUESTIONS_NO_LEAN", FALLBACK_QUESTIONS_NO_LEAN),
+    ):
+        if len(pool) < 30:
+            raise AssertionError(f"{name} must have at least 30 entries (got {len(pool)})")
     if len(set(FALLBACK_QUESTIONS)) != len(FALLBACK_QUESTIONS):
-        raise AssertionError("FALLBACK_QUESTIONS must not contain duplicates")
+        raise AssertionError("FALLBACK_QUESTIONS (YES_LEAN+NO_LEAN) must not contain duplicates")
     for q in FALLBACK_QUESTIONS:
         if not is_valid_question(q):
             raise AssertionError(f"FALLBACK_QUESTIONS entry fails validation: {q!r}")
@@ -175,14 +230,19 @@ def append_question(
     *,
     game_id: str,
     round_num: int,
+    vote_num: int,
     history_path: str | Path = DEFAULT_HISTORY_PATH,
 ) -> None:
     """
-    実際にラウンドで公開した質問を履歴ファイルへ1行追記する（§5.1）
+    実際に投票で公開した質問を履歴ファイルへ1行追記する（§5.1）
 
     Game.on_question_published から呼ぶことを想定（AI試合のみ。Bot試合・
     動作確認では呼ばない）。ファイルは消さずに伸ばし続け、git管理からは外す
     （data/はリポジトリの.gitignoreで既に除外済み）。
+
+    v0.4でvote_numを足した（§1.1: 1ラウンドに複数の投票があるため、
+    ラウンド番号だけでは質問の使用タイミングを特定できない）。既存の
+    v0.3形式の行（vote_numが無い）は書き換えない・消さない（追記のみ）。
     """
     path = Path(history_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,6 +250,7 @@ def append_question(
         "question": question,
         "game_id": game_id,
         "round_num": round_num,
+        "vote_num": vote_num,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     with path.open("a", encoding="utf-8") as f:
@@ -217,7 +278,9 @@ def _extract_questions_json(text: str) -> list[str] | None:
     return None
 
 
-def _build_question_prompt(recent: list[str], samples: list[str] | None = None) -> tuple[str, str]:
+def _build_question_prompt(
+    recent: list[str], samples: list[str] | None = None, count: int = QUESTION_COUNT,
+) -> tuple[str, str]:
     """出題AIへ送る(system, user)プロンプトを作る（§5.1: プレイヤー・試合状況は渡さない）"""
     system = (
         "あなたは「くだらない質問」を作るAIです。これから出す指示にだけ従い、"
@@ -227,34 +290,52 @@ def _build_question_prompt(recent: list[str], samples: list[str] | None = None) 
     samples_block = (
         "\n".join(f"- {q}" for q in samples) if samples else "（見本はありません）"
     )
+    half = count // 2
     user = (
-        f"YES/NOで答えられる、くだらない断定文を{QUESTION_COUNT}問作ってください。\n"
+        f"YES/NOで答えられる、くだらない断定文を{count}問作ってください。\n"
         "条件:\n"
         f"- 1問は{MAX_QUESTION_LEN}字以内\n"
         "- 予備知識なしで誰でも意味が分かる\n"
         "- クイズや豆知識の問題にしない。くだらない、どうでもいい断定にする\n"
         "- 政治・宗教・実在の人物・差別・性・暴力に一切触れない\n"
-        f"- {QUESTION_COUNT}問どうしで内容やテーマが重複しない\n"
-        "- 以下の「直近使った質問」とは内容がかぶらないようにする\n\n"
+        f"- {count}問どうしで内容やテーマが重複しない\n"
+        "- 以下の「直近使った質問」とは内容がかぶらないようにする\n"
+        "- ふつうに考えるとYESと答えたくなる文と、ふつうに考えるとNOと答えたくなる文を、"
+        f"およそ半分ずつ（{half}問ずつ前後）にする。並び順は混ぜてよい\n\n"
         f"## 見本（このくらいくだらない断定にする。質問の種類や分類は自由）\n{samples_block}\n\n"
         f"## 直近使った質問\n{recent_block}\n\n"
         "出力は必ず次のJSON形式だけにしてください: "
-        f'{{"questions": ["質問1", "質問2", ... （{QUESTION_COUNT}個）]}}'
+        f'{{"questions": ["質問1", "質問2", ... （{count}個）]}}'
     )
     return system, user
 
 
 def _select_fallback(count: int, avoid: set[str], seed: int) -> list[str]:
-    """予備質問リストから直近10問・既に選んだ問を避けてcount問を選ぶ（§5.3）"""
-    pool = [q for q in FALLBACK_QUESTIONS if q not in avoid]
-    if len(pool) < count:
-        # 予備だけでも足りない極端なケース（通常は起きない: 36問 vs avoidは最大22件）。
-        # §5.3「試合は止めない」を最優先し、avoidを無視してでも埋める。
-        pool = list(FALLBACK_QUESTIONS)
+    """
+    予備質問リストから直近N問・既に選んだ問を避けてcount問を選ぶ（§5.3）
+
+    YES寄り・NO寄りの両方からおよそ半分ずつ選ぶ（サイクル4.2b）。片方が
+    avoidで足りなくなった場合は、もう片方で埋める（§5.3「試合は止めない」
+    を最優先し、それでも足りなければavoidを無視してでも埋める）。
+    """
     rng = random.Random(seed)
-    shuffled = list(pool)
-    rng.shuffle(shuffled)
-    return shuffled[:count]
+    yes_pool = [q for q in FALLBACK_QUESTIONS_YES_LEAN if q not in avoid]
+    no_pool = [q for q in FALLBACK_QUESTIONS_NO_LEAN if q not in avoid]
+    if len(yes_pool) + len(no_pool) < count:
+        yes_pool = list(FALLBACK_QUESTIONS_YES_LEAN)
+        no_pool = list(FALLBACK_QUESTIONS_NO_LEAN)
+    rng.shuffle(yes_pool)
+    rng.shuffle(no_pool)
+
+    half = count // 2
+    selected = yes_pool[:half] + no_pool[: count - half]
+    if len(selected) < count:
+        # 片方が足りなかった分を、もう片方の残りから埋める
+        leftover = [q for q in (yes_pool + no_pool) if q not in selected]
+        rng.shuffle(leftover)
+        selected += leftover[: count - len(selected)]
+    rng.shuffle(selected)
+    return selected[:count]
 
 
 def generate_questions(
@@ -263,38 +344,57 @@ def generate_questions(
     adapter: Any = None,
     model_key: str | None = None,
     history_path: str | Path = DEFAULT_HISTORY_PATH,
-    count: int = QUESTION_COUNT,
+    count: int | None = None,
+    history_window: int | None = None,
     seed: int = 0,
     max_tokens: int = 2000,
 ) -> QuestionSet:
     """
-    試合前に1回、出題AIへ12問をまとめて作らせ、機械検査・予備補完まで行う（§5）
+    試合前に1回、出題AIへ24問をまとめて作らせ、機械検査・予備補完まで行う（§5）
 
     Args:
-        config: GameConfig（question_model の既定値取得に使う。adapter未指定時のみ参照）
+        config: GameConfig（question_model・questions_per_game・
+            recent_questions_window の既定値取得に使う。adapter未指定時のみ参照）
         adapter: .complete(system, messages, max_tokens, temperature, request_options)
             を持つアダプタ（テスト用に偽アダプタを注入できる）。Noneならmodel_keyから
             llm.adapters.create_adapter() で自動生成する
         model_key: llm/models.py::MODEL_REGISTRY のキー。Noneなら config.question_model
             （configもNoneなら "DR_HAIKU"）
-        history_path: 直近10問の取得元（data/question_history.jsonl）
-        count: 生成数（既定12、§5.1）
+        history_path: 直近N問の取得元（data/question_history.jsonl）
+        count: 生成数。Noneならconfig.questions_per_game（configもNoneなら
+            QUESTION_COUNT=24、§5.1）
+        history_window: 直近N問の取得件数。Noneならconfig.recent_questions_window
+            （configもNoneならHISTORY_SIZE=30）
         seed: 予備選択の乱数シード（再現性のため試合シードを渡すことを想定）
         max_tokens: 出題AI呼び出しのmax_tokens
 
     Returns:
-        QuestionSet（12問・各問の出自・予備使用数・生AI応答・エラー概要）。
+        QuestionSet（count問・各問の出自・予備使用数・生AI応答・エラー概要）。
         例外は外に出さない（呼び出し失敗は試合を止めない、§5.3）。
     """
     _validate_fallback_pool()
-    recent = recent_questions(history_path, HISTORY_SIZE)
+    effective_count = count if count is not None else (
+        getattr(config, "questions_per_game", None) or QUESTION_COUNT
+    )
+    effective_window = history_window if history_window is not None else (
+        getattr(config, "recent_questions_window", None) or HISTORY_SIZE
+    )
+    recent = recent_questions(history_path, effective_window)
     recent_set = set(recent)
     sample_rng = random.Random(seed)
-    samples = sample_rng.sample(FALLBACK_QUESTIONS, k=min(5, len(FALLBACK_QUESTIONS)))
+    half = 5 // 2
+    yes_samples = sample_rng.sample(
+        FALLBACK_QUESTIONS_YES_LEAN, k=min(half, len(FALLBACK_QUESTIONS_YES_LEAN)),
+    )
+    no_samples = sample_rng.sample(
+        FALLBACK_QUESTIONS_NO_LEAN, k=min(5 - half, len(FALLBACK_QUESTIONS_NO_LEAN)),
+    )
+    samples = yes_samples + no_samples
 
     raw_text: str | None = None
     error: str | None = None
     ai_questions: list[str] = []
+    count = effective_count
 
     try:
         active_adapter = adapter
@@ -305,7 +405,7 @@ def generate_questions(
             key = model_key or getattr(config, "question_model", None) or "DR_HAIKU"
             model_info = get_model(key)
             active_adapter = create_adapter(model_info)
-        system, user = _build_question_prompt(recent, samples)
+        system, user = _build_question_prompt(recent, samples, count=effective_count)
         text, _usage = active_adapter.complete(
             system=system,
             messages=[{"role": "user", "content": user}],
