@@ -354,8 +354,18 @@ def loan_stats(games: list[dict]) -> dict:
 
 
 def oversell_stats(games: list[dict], obligor: str = "P01") -> dict:
-    """V10: 約束した本人の開始後の借金、成立順位（1本目/2本目/3本目）別の取りはぐれ額"""
+    """
+    V10: 約束した本人の開始後の借金、成立順位（1本目/2本目/3本目）別の取りはぐれ額
+
+    debt_post_mean は全試合の平均（旧仕様。後方互換のため残す）。
+    サイクル4.2で、報告書の文章が「勝ち残った試合のみ」と書きながら実際は
+    全試合の平均を使っていた誤りを直すため、「勝ち残った試合（本人が
+    type_c_conditionalの支払いを1本でも行った試合）」と「勝ち残らなかった
+    試合」で分けた平均（debt_post_mean_won / _not_won）も返す。
+    """
     debt_post_values = [g["final_debt_post"][obligor] for g in games]
+    debt_post_won: list[int] = []
+    debt_post_not_won: list[int] = []
     shortfall_by_rank: dict[int, list[int]] = defaultdict(list)
 
     for g in games:
@@ -364,7 +374,9 @@ def oversell_stats(games: list[dict], obligor: str = "P01") -> dict:
             if p["obligor"] == obligor and p["ob_type"] == "type_c_conditional"
         ]
         if not payments:
+            debt_post_not_won.append(g["final_debt_post"][obligor])
             continue
+        debt_post_won.append(g["final_debt_post"][obligor])
         by_seq: dict[int, list[dict]] = defaultdict(list)
         for p in payments:
             by_seq[p["contract_seq"]].append(p)
@@ -376,8 +388,143 @@ def oversell_stats(games: list[dict], obligor: str = "P01") -> dict:
 
     return {
         "debt_post_mean": _mean(debt_post_values),
+        "debt_post_mean_won": _mean(debt_post_won),
+        "debt_post_mean_not_won": _mean(debt_post_not_won),
+        "n_games_won": len(debt_post_won),
+        "n_games_not_won": len(debt_post_not_won),
         "debt_post_max": max(debt_post_values) if debt_post_values else 0,
         "shortfall_mean_by_rank": {str(k): _mean(v) for k, v in shortfall_by_rank.items()},
         "shortfall_total_by_rank": {str(k): sum(v) for k, v in shortfall_by_rank.items()},
         "n_games_with_payment": len(shortfall_by_rank.get(1, [])),
+    }
+
+
+# --- V8の見積もり: 型Bを破る得と損（サイクル4.2、報告書D3の修正） ---
+
+_SPLIT_LABELS: dict[int, str] = {5: "7対5", 4: "8対4", 3: "9対3", 2: "10対2", 1: "11対1"}
+"""decisive なV1の少数派人数k -> 表示名（§12.7の見出しに合わせる）"""
+
+
+def type_b_break_value_estimate(games: list[dict], config: Any) -> dict:
+    """
+    V8「型Bを破る得と損」の見積もり（V1=12人とも無作為の記録から、
+    各ラウンドの最初の投票だけを見る。サイクル4.1のBot検証では測りきれな
+    かった「違約金は軽いか重いか」を、V1の記録だけから見積もる。§12.7。
+
+    「得た額」= そのラウンドで受け取った山 −（vote_num=1を含む、以降に
+    発生した）延長料。vote_num=1自体がやり直しだった場合は、その延長料も
+    含める（「その投票以降」はその投票自身を含む、と解釈する）。
+
+    得（多数派の1人が票を変えた場合）: 行き先の平均を使う。
+      7対5→6対6のやり直し、8対4→5人の少数派、9対3→4人の少数派、
+      10対2→3人の少数派、11対1→2人の少数派（§12.7の表と同じ対応）。
+      全体平均は、各割れ方の「多数派の人数」で重み付けする
+      （その人数の誰か1人が switchし得る、という数え方）。
+
+    損（多数派でなかった人が票を変えた場合）: 少数派の人（2〜5人）が
+    票を変えると多数派に入って0円になるので、損=その人がもともと得て
+    いた額（gain_avg[k]）そのもの。少数派が1人（11対1）のときは、
+    その人が票を変えると全員一致（12対0、やり直し扱い）になるので、
+    損=gain_avg[1]-retry_avg。6対6の人が票を変えると7対5の多数派に
+    入るので、損=retry_avg。全体平均は、各割れ方の「少数派の人数」
+    （6対6は12人）で重み付けする。
+
+    人間側の机上計算との突き合わせ結果（V1_seed1_n1000.json、2026-10-10):
+    得の平均は 1,955,126.75（人間側1,955,127、差0.25円）とほぼ完全に一致
+    したが、損の平均は本関数で1,957,792円前後になり、人間側の1,945,283円
+    とは一致しなかった（差約12,500円・0.6%）。損の重み付け（決着時は
+    occurrence×少数派人数、同数時はoccurrence×12）を変えて何通りか試したが
+    いずれも一致せず、原因は特定できなかった。ここでは本関数の計算方法を
+    明記したうえで、両方の数字を報告書に残す（合わせにいかない、CLAUDE.md
+    の方針）。
+    """
+    ext_fee = config.extension_fee
+    gain_by_k: dict[int, list[int]] = defaultdict(list)
+    retry_gain: list[int] = []
+    split_counts: dict[tuple[int, int], int] = defaultdict(int)
+
+    for g in games:
+        for r in g["rounds"]:
+            votes = r["votes"]
+            v1 = next(v for v in votes if v["vote_num"] == 1)
+            yes_ids = set(v1["yes_ids"])
+            no_ids = set(v1["no_ids"])
+            payout = {pid: r["payout_per_winner"] for pid in r["winner_ids"]}
+
+            def _fee_paid(pid: str) -> int:
+                total = 0
+                for v in votes:
+                    if v["result"] in ("retry", "abort") and (
+                        pid in v["yes_ids"] or pid in v["no_ids"]
+                    ):
+                        total += ext_fee
+                return total
+
+            def _gain(pid: str) -> int:
+                return payout.get(pid, 0) - _fee_paid(pid)
+
+            if v1["result"] == "decisive":
+                minority = yes_ids if len(yes_ids) < len(no_ids) else no_ids
+                majority = no_ids if len(yes_ids) < len(no_ids) else yes_ids
+                k = len(minority)
+                split_counts[(len(majority), k)] += 1
+                for pid in minority:
+                    gain_by_k[k].append(_gain(pid))
+            else:
+                hi, lo = (len(yes_ids), len(no_ids)) if len(yes_ids) >= len(no_ids) else (len(no_ids), len(yes_ids))
+                split_counts[(hi, lo)] += 1
+                for pid in yes_ids | no_ids:
+                    retry_gain.append(_gain(pid))
+
+    gain_avg = {k: _mean(v) for k, v in gain_by_k.items()}
+    retry_avg = _mean(retry_gain)
+    total_rounds = sum(split_counts.values())
+
+    occurrence = {k: split_counts.get((12 - k, k), 0) for k in (1, 2, 3, 4, 5)}
+    tie_occurrence = split_counts.get((6, 6), 0) + split_counts.get((12, 0), 0)
+
+    gain_destination = {
+        5: retry_avg, 4: gain_avg.get(5, 0.0), 3: gain_avg.get(4, 0.0),
+        2: gain_avg.get(3, 0.0), 1: gain_avg.get(2, 0.0),
+    }
+    majority_size = {5: 7, 4: 8, 3: 9, 2: 10, 1: 11}
+    gain_weight_total = sum(occurrence[k] * majority_size[k] for k in occurrence)
+    gain_overall = (
+        sum(occurrence[k] * majority_size[k] * gain_destination[k] for k in occurrence)
+        / gain_weight_total if gain_weight_total else 0.0
+    )
+
+    loss_value = {k: gain_avg.get(k, 0.0) for k in (2, 3, 4, 5)}
+    loss_value[1] = gain_avg.get(1, 0.0) - retry_avg
+    loss_value["tie"] = retry_avg
+    loss_weight_total = sum(occurrence[k] * k for k in occurrence) + tie_occurrence * 12
+    loss_overall = (
+        (sum(occurrence[k] * k * loss_value[k] for k in occurrence) + tie_occurrence * 12 * loss_value["tie"])
+        / loss_weight_total if loss_weight_total else 0.0
+    )
+
+    penalties = (1_000_000, 3_000_000, 5_000_000)
+    penalty_estimates = {}
+    for penalty in penalties:
+        confidence_required = (
+            (penalty + loss_overall) / (gain_overall + loss_overall)
+            if (gain_overall + loss_overall) else None
+        )
+        penalty_estimates[str(penalty)] = {
+            "net_if_break_knowing_losing_side": gain_overall - penalty,
+            "confidence_required": confidence_required,
+        }
+
+    return {
+        "total_rounds": total_rounds,
+        "occurrence_ratio": {
+            _SPLIT_LABELS[k]: (occurrence[k] / total_rounds if total_rounds else 0.0)
+            for k in occurrence
+        },
+        "gain_avg_by_minority_size": {str(k): v for k, v in gain_avg.items()},
+        "retry_avg": retry_avg,
+        "gain_by_split": {_SPLIT_LABELS[k]: gain_destination[k] for k in gain_destination},
+        "gain_overall": gain_overall,
+        "loss_overall": loss_overall,
+        "penalty_estimates": penalty_estimates,
     }

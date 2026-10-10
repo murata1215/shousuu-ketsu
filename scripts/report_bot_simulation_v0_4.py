@@ -1,5 +1,6 @@
 """
-Bot検証レポート生成スクリプト（v0.4、サイクル4.1新規実装）
+Bot検証レポート生成スクリプト（v0.4、サイクル4.1新規実装。サイクル4.2で
+報告書の3か所の誤り（V9・V10・V8）を修正した）
 
 scripts/simulate.py が --out-dir（既定 data/sim_v0_4）に保存した25条件分の
 生データを読み込み、doc/analysis/bot_simulation_report_v0_4.md を作る。
@@ -17,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sim.metrics import (
     common_stats, group_stats, loan_stats, oversell_stats,
-    paired_final_asset_diff, type_b_pact_stats, type_b_vote_level_counterfactual,
+    paired_final_asset_diff, type_b_break_value_estimate, type_b_pact_stats,
+    type_b_vote_level_counterfactual,
 )
 from sim.scenarios import GROUP_A, GROUP_B, HUB_GROUPS, config_for
 from sim.store import load_raw, shard_path
@@ -49,6 +51,12 @@ def _pct(x: float) -> str:
 
 def _yen(x: float) -> str:
     return f"{x:,.0f}円"
+
+
+def _ranked_text(mapping: dict[str, float], labels: dict[str, str]) -> str:
+    """{キー: 値} を値の大きい順に並べ「400万(−1,051,986)＞120万(−1,134,566)＞…」の形にする"""
+    ordered = sorted(mapping.items(), key=lambda kv: kv[1], reverse=True)
+    return "＞".join(f"{labels[k]}({_yen(v)})" for k, v in ordered)
 
 
 def main() -> None:
@@ -105,19 +113,33 @@ def main() -> None:
     lines.append(
         "- V8（型Bで縛り合い、P01が破る）: 違約金100万で、同じシードの対比較で"
         "P01の最終資産が守った場合より高かった試合は{}/{}件のみ"
-        "（破ったほうが得だった場面はほぼ無い）。".format(
+        "（破ったほうが得だった場面はほぼ無い）。ただしこれは「毎ラウンド最初の"
+        "投票で必ず破る」動きだけを測ったもので、これは違約金の額に関係なく損を"
+        "する。「違約金100万は軽いか重いか」には答えていない（本文のV8節の見積もり"
+        "を参照）。".format(
             round(v8b100["n"] * v8b100["better_ratio"]), v8b100["n"],
         ),
     )
+    loan_labels = {"Loan120man": "120万", "Loan400man": "400万", "Loan1000man": "1000万"}
+    ls9 = loan_stats(games["V9"])
     lines.append(
-        "- V9（借入額120万/400万/1000万）: 最終資産の平均は借入額が小さいほど高い"
-        "（詳細は本文）。",
+        "- V9（借入額120万/400万/1000万）: 利率15%では、最終資産の平均は"
+        "{}。一度も山を取れなかった試合では{}（詳細は本文）。".format(
+            _ranked_text(ls9["asset_mean_by_label"], loan_labels),
+            _ranked_text(
+                {k: v.get("0", 0) for k, v in ls9["asset_mean_by_label_and_wins"].items()},
+                loan_labels,
+            ),
+        ),
     )
     v10 = oversell_stats(games["V10"])
     lines.append(
-        "- V10（割合の重ね売り）: P01の開始後の借金の平均{}。3本目（成立順3番目）の"
+        "- V10（割合の重ね売り）: P01の開始後の借金は、勝ち残った試合（{}試合）の"
+        "平均{}、勝ち残らなかった試合（{}試合）の平均{}。3本目（成立順3番目）の"
         "契約だけに取りはぐれが生じ、平均取りはぐれ額{}（1本目・2本目は0円）。".format(
-            _yen(v10["debt_post_mean"]), _yen(v10["shortfall_mean_by_rank"].get("3", 0)),
+            v10["n_games_won"], _yen(v10["debt_post_mean_won"]),
+            v10["n_games_not_won"], _yen(v10["debt_post_mean_not_won"]),
+            _yen(v10["shortfall_mean_by_rank"].get("3", 0)),
         ),
     )
     lines.append("")
@@ -269,6 +291,72 @@ def main() -> None:
         "違約金そのものより、この構造変化の影響が大きい。",
     )
     lines.append("")
+    lines.append(
+        "上の測り方は「毎ラウンド最初の投票で必ず破る」動きだけで、これは違約金の額に"
+        "関係なく損をする（4人組が2対2から1対3に崩れる構造変化が主因）。"
+        "「違約金100万は軽いか重いか」には答えていないので、V1（12人とも無作為）の"
+        "記録から別の見積もりを出す。",
+    )
+    lines.append("")
+    lines.append("### 型Bを破る得と損の見積もり（V1の記録から）")
+    lines.append("")
+    lines.append(
+        "V1（12人とも無作為）の1000試合、各ラウンドの最初の投票だけを見る。"
+        "「得た額」= そのラウンドで受け取った山 − その投票以降に払った延長料"
+        "（最初の投票自身がやり直しだった場合はその延長料も含む）。",
+    )
+    lines.append("")
+    v8est = type_b_break_value_estimate(games["V1"], config_for("V1"))
+    lines.append(
+        "最初の投票が決着した場合、多数派の1人が票を変えた先（7対5なら6対6の"
+        "やり直し、8対4なら5人の少数派、…）の得の平均:",
+    )
+    lines.append("")
+    lines.append("| 最初の投票の割れ方 | 起きる割合 | 得の平均 |")
+    lines.append("| --- | --- | --- |")
+    for label in ["7対5", "8対4", "9対3", "10対2", "11対1"]:
+        lines.append(
+            f"| {label} | {_pct(v8est['occurrence_ratio'][label])} | "
+            f"{_yen(v8est['gain_by_split'][label])} |",
+        )
+    lines.append("")
+    lines.append(f"- 得の平均（全体）: {_yen(v8est['gain_overall'])}")
+    lines.append(
+        "- 損の平均（多数派でなかった人が票を変えた場合。少数派の人が票を変えると"
+        f"多数派に入り0円、少数派が1人のときはやり直しの平均を使う）: "
+        f"{_yen(v8est['loss_overall'])}",
+    )
+    lines.append("")
+    lines.append("| 違約金 | 分かっていて破る場合の差し引き | 破って引き合うのに必要な確信 |")
+    lines.append("| --- | --- | --- |")
+    for penalty_key, label in [("1000000", "100万"), ("3000000", "300万"), ("5000000", "500万")]:
+        est = v8est["penalty_estimates"][penalty_key]
+        conf = est["confidence_required"]
+        conf_text = _pct(conf) if conf is not None else "計算不可"
+        lines.append(f"| {label} | {_yen(est['net_if_break_knowing_losing_side'])} | {conf_text} |")
+    lines.append("")
+    lines.append(
+        "必要な確信 =（違約金＋損の平均）÷（得の平均＋損の平均）。違約金100万なら、"
+        "分かっていて破れば平均で得になるが、300万・500万では平均では割に合わない"
+        "（必要な確信が100%を超える）。この見積もりは、組の山分けや、破った後の"
+        "周りの反応を入れていない。",
+    )
+    lines.append("")
+    lines.append(
+        "人間側の計算結果との突き合わせ: 得の平均は7対5で895,011・8対4で2,550,233・"
+        "9対3で2,730,471・10対2で4,073,364・11対1で6,261,654、全体で1,955,127。"
+        "いずれも本関数の計算と1円単位で一致した。損の平均は人間側1,945,283に対し、"
+        "本関数は{}（差{}・{}）。損の重み付け（決着時はoccurrence×少数派人数、"
+        "同数時はoccurrence×12）を何通りか変えて試したが、一致する重み付けは"
+        "見つからなかった。差を合わせにいかず、ここに記録する。必要な確信への"
+        "影響は小さい（違約金100万で{}、人間側は76%）。".format(
+            _yen(v8est["loss_overall"]),
+            _yen(v8est["loss_overall"] - 1_945_283),
+            f"{(v8est['loss_overall'] - 1_945_283) / 1_945_283 * 100:+.2f}%",
+            _pct(v8est["penalty_estimates"]["1000000"]["confidence_required"]),
+        ),
+    )
+    lines.append("")
 
     # --- V9 ---
     lines.append("## V9: 借入額120万・400万・1000万を混ぜる")
@@ -292,8 +380,11 @@ def main() -> None:
     lines.append("## V10: 割合の重ね売り")
     lines.append("")
     lines.append(
-        f"- P01（勝ち残った試合のみ、対象{v10['n_games_with_payment']}試合）の開始後の借金: "
-        f"平均{_yen(v10['debt_post_mean'])}、最大{_yen(v10['debt_post_max'])}",
+        f"- P01の開始後の借金: 全{v10['n_games_won'] + v10['n_games_not_won']}試合の平均"
+        f"{_yen(v10['debt_post_mean'])}。うち勝ち残った試合（対象{v10['n_games_won']}試合）の"
+        f"平均{_yen(v10['debt_post_mean_won'])}、勝ち残らなかった試合（対象"
+        f"{v10['n_games_not_won']}試合）の平均{_yen(v10['debt_post_mean_not_won'])}。"
+        f"最大{_yen(v10['debt_post_max'])}",
     )
     lines.append("- 成立順位別の取りはぐれ額（0は1本も不足なし）:")
     lines.append("")
@@ -420,15 +511,23 @@ def main() -> None:
         "NO側（破った本人を含む3人）が12人全体の投票で多数派（退場）になりやすく"
         "なり、違約金そのものより大きな損失要因になっていた。破っていない組員"
         "（P02、相手方）の資産は影響を受けず、相手方以外の組員（P03・P04）の資産も"
-        "大きく下がった。",
+        "大きく下がった。ただしこれは「毎ラウンド最初の投票で必ず破る」動きだけを"
+        "測ったもので、違約金の額に関係なく損をする。「違約金100万は軽いか重いか」"
+        "には答えていない。V1（12人とも無作為）の記録から別途見積もった得と損では、"
+        "違約金100万なら分かっていて破れば平均で得になるが、300万・500万では"
+        "平均では割に合わなかった（本文のV8節の見積もりを参照）。",
     )
     lines.append(
-        "- V9（借入額120万/400万/1000万、投票は無作為）では、1000試合平均の最終資産は"
-        "借入額が小さいほど高かった。山を一度も取れなかった試合に限ると、借入額が"
-        "大きいほど最終資産は低かった（多く借りても一度も取れなければ得にならない）。"
-        "開始後の利率を15%→10%に変えても、120万借入の最終資産平均は上がったが、"
-        "400万・1000万の平均はほぼ変わらなかった（開始後の借金を負う場面が"
-        "少ないため）。",
+        "- V9（借入額120万/400万/1000万、投票は無作為）では、利率15%での1000試合平均の"
+        "最終資産は{}、山を一度も取れなかった試合に限ると{}だった。120万が最も高く"
+        "なるのは開始後の利率を10%に変えた場合だけだった（開始後の借金を負う場面が"
+        "少ないため）。".format(
+            _ranked_text(ls9["asset_mean_by_label"], loan_labels),
+            _ranked_text(
+                {k: v.get("0", 0) for k, v in ls9["asset_mean_by_label_and_wins"].items()},
+                loan_labels,
+            ),
+        ),
     )
     lines.append(
         "- V10（割合の重ね売り、P01が50%の契約3本をP02・P03・P04に結ぶ）では、"

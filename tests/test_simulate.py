@@ -12,9 +12,10 @@ V1〜V10（シナリオごとに見るべき指標が大きく異なる）に合
 import pytest
 
 from sim.metrics import (
-    collect_raw, common_stats, group_stats, loan_stats, oversell_stats, type_b_pact_stats,
+    collect_raw, common_stats, group_stats, loan_stats, oversell_stats, type_b_break_value_estimate,
+    type_b_pact_stats,
 )
-from sim.scenarios import GROUP_A, GROUP_B, GROUP_C, HUB_GROUPS, SCENARIO_KEYS
+from sim.scenarios import GROUP_A, GROUP_B, GROUP_C, HUB_GROUPS, SCENARIO_KEYS, config_for
 
 GROUP_SCENARIOS = ["V2", "V3g2", "V3g3", "V3g5", "V3g6", "V4", "V5", "V6"]
 TYPE_B_SCENARIOS = ["V8keep_pen100", "V8keep_pen300", "V8keep_pen500",
@@ -108,6 +109,46 @@ def test_v10_oversell_produces_contract_payments_for_p01() -> None:
     raw = collect_raw("V10", games=30, seed_start=1)
     stats = oversell_stats(raw["games"])
     assert stats["n_games_with_payment"] > 0
+
+
+def test_v10_oversell_splits_debt_by_win_status() -> None:
+    """
+    報告書D2の修正確認: debt_post_mean_won（勝ち残った試合だけの平均）は、
+    n_games_with_paymentと同じ本数（P01がtype_c_conditionalの支払いを
+    行った試合＝勝ち残った試合）で計算され、debt_post_mean（全試合）とは
+    別の値になる（サイクル4.1時点ではdebt_post_meanを「勝ち残った試合の
+    平均」と誤って報告していた）。
+    """
+    raw = collect_raw("V10", games=100, seed_start=1)
+    stats = oversell_stats(raw["games"])
+    assert stats["n_games_won"] == stats["n_games_with_payment"]
+    assert stats["n_games_won"] + stats["n_games_not_won"] == len(raw["games"])
+    if stats["n_games_won"] and stats["n_games_not_won"]:
+        assert stats["debt_post_mean_won"] != stats["debt_post_mean_not_won"]
+        # 全試合平均は、勝ち残り/勝ち残らずの間に挟まれる
+        lo, hi = sorted([stats["debt_post_mean_won"], stats["debt_post_mean_not_won"]])
+        assert lo <= stats["debt_post_mean"] <= hi
+
+
+def test_type_b_break_value_estimate_structure() -> None:
+    """
+    報告書D3の見積もり: V1（12人とも無作為）の記録から得・損の平均と、
+    違約金3通りの見積もりが作れる。割れ方5種類（7対5〜11対1）の
+    occurrence_ratioの合計はdecisive分のみなので1を超えない。
+    """
+    raw = collect_raw("V1", games=200, seed_start=1)
+    result = type_b_break_value_estimate(raw["games"], config_for("V1"))
+    assert set(result["gain_by_split"]) == {"7対5", "8対4", "9対3", "10対2", "11対1"}
+    assert sum(result["occurrence_ratio"].values()) < 1.0
+    assert result["gain_overall"] > 0
+    assert result["loss_overall"] > 0
+    assert set(result["penalty_estimates"]) == {"1000000", "3000000", "5000000"}
+    # 違約金が大きいほど、分かっていて破る場合の差し引きは小さくなる
+    nets = [
+        result["penalty_estimates"][k]["net_if_break_knowing_losing_side"]
+        for k in ("1000000", "3000000", "5000000")
+    ]
+    assert nets[0] > nets[1] > nets[2]
 
 
 def test_v5_all_three_groups_always_tie_6_against_6_and_abort() -> None:
