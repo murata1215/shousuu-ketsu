@@ -7,9 +7,14 @@ PlayerAgentをそのまま包み、choose_loan/negotiate/commitは中身にそ�
 エージェントの行動には一切介入しないため、ゲームの結果（投票・契約・
 配当・借金）はラッパーの有無で変わらない（ルールエンジンを変えない）。
 
-借金の上限到達（「借金の上限に達した人数」）や王様作り（「R12開始時点
-＝R11終了時点の残り借入枠」）の判定に、ラウンドごとの自分の現金・
-借金残高が必要なため、Game本体の外からこの記録を使う。
+借金の上限到達（「借金の上限に達した人数」）や王様作り（最終ラウンド開始
+時点の残り借入枠）の判定に、ラウンドごとの自分の現金・借金残高が必要なため、
+Game本体の外からこの記録を使う。
+
+サイクル4.1: negotiate()/commit()がv0.3のシグネチャ（vote_num無し）の
+ままで、v0.4のengine/game.py（vote_num付きで位置引数呼び出し）と
+噛み合わずTypeErrorになっていた（サイクル4.0でPlayerAgent I/Fに
+vote_numを追加したときの移植漏れ）。vote_numを追加して直した。
 """
 
 from engine.config import GameConfig
@@ -36,12 +41,12 @@ class RecordingAgent(PlayerAgent):
         return self.inner.choose_loan(config)
 
     def negotiate(
-        self, player_state: PlayerState, round_num: int, turn: int, visible_state: dict,
+        self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
     ) -> Action:
-        return self.inner.negotiate(player_state, round_num, turn, visible_state)
+        return self.inner.negotiate(player_state, round_num, vote_num, turn, visible_state)
 
-    def commit(self, player_state: PlayerState, round_num: int, visible_state: dict) -> Vote:
-        return self.inner.commit(player_state, round_num, visible_state)
+    def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
+        return self.inner.commit(player_state, round_num, vote_num, visible_state)
 
     def reflect(self, player_state: PlayerState, round_num: int, visible_state: dict) -> None:
         self.history[round_num] = player_state
