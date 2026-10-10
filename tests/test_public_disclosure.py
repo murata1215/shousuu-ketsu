@@ -375,7 +375,7 @@ def test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only() -> 
 
     error = p01_by_turn[(1, 1, 2)]["my_last_action_error"]
     assert error is not None
-    ja_text = reject_reason_ja(error)
+    ja_text = reject_reason_ja(error, config)
     assert ja_text is not None
     assert all(ord(ch) < 128 for ch in ja_text) is False  # 日本語の文字を含む
     assert "Insufficient cash" not in ja_text  # 英語の理由文は入れない

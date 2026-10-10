@@ -931,11 +931,12 @@ class Game:
             for ob in due_vote + due_round
             if ob.obligor == player_id
         ]
+        pre_pct = self.config.interest_rate_pre_num / self.config.interest_rate_pre_den * 100
         return {
             "cash": me.cash,
             "debt_pre": me.debt_pre,
             "debt_pre_repayable": False,
-            "debt_pre_note": "返済不可（開始前の借金・5%）",
+            "debt_pre_note": f"返済不可（開始前の借金・{pre_pct:g}%）",
             "debt_post": me.debt_post,
             "total_debt": me.total_debt,
             "remaining_credit": player_ops.remaining_credit(me, self.config),

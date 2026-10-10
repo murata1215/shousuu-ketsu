@@ -9,6 +9,13 @@ TermRejectReason`）が返す理由はコード（英語の短い識別子）と
 REASON_JA に無いコードを渡すと `KeyError` で落ちる（エンジンが返しうる
 理由の全種類に日本語の文を用意していることを、テストで固定する。
 `tests/test_reasons.py::test_every_reject_reason_has_japanese` 参照）。
+
+サイクル4.2 E1で、`NO_POST_DEBT` のテンプレートに利率（15%・5%）が直書き
+されていたのを直した。設定を変えた試合では誤った説明になるため、
+`reject_reason_ja(err, config)` の `config` から差し込む（既定値を持つ
+第2の文面を作らないよう、`config` は必須引数にする）。E2で、
+`TRANSFER_INSUFFICIENT_CASH` の金額が桁区切りなしだったのも直した
+（`llm/formatting.py::comma` を使う。手番の文面と同じ書式に揃える）。
 """
 
 from __future__ import annotations
@@ -16,7 +23,9 @@ from __future__ import annotations
 from typing import Any
 
 from engine.actions import RejectReason
+from engine.config import GameConfig
 from engine.contracts import TermRejectReason
+from llm.formatting import comma, pct
 
 # --- engine/actions.py::RejectReason（16種） ---
 _ACTION_REASON_JA: dict[str, str] = {
@@ -34,8 +43,8 @@ _ACTION_REASON_JA: dict[str, str] = {
         "返済額が{amount}でした。返済額は1円以上の整数で指定してください。"
     ),
     RejectReason.NO_POST_DEBT.value: (
-        "開始後の借金（15%）が0円のため、返済するものがありません。"
-        "開始前の借金（5%）は最後まで返済できません。"
+        "開始後の借金（{late_interest_pct}%）が0円のため、返済するものがありません。"
+        "開始前の借金（{interest_pct}%）は最後まで返済できません。"
     ),
     RejectReason.WITH_EMPTY.value: "契約の相手（with）が空でした。相手を1人以上指定してください。",
     RejectReason.WITH_INCLUDES_PROPOSER.value: (
@@ -157,14 +166,22 @@ _TERM_REASON_JA: dict[str, str] = {
 REASON_JA: dict[str, str] = {**_ACTION_REASON_JA, **_TERM_REASON_JA}
 """理由コード（文字列） -> 日本語テンプレート（str.format用）の全対応表"""
 
+# コードごとに、paramsの中で「実額」として桁区切りを付ける対象キー
+# （不正値のエコー=round_num・share_percent・vote等は生値のまま、E2）
+_MONEY_PARAM_KEYS: dict[str, frozenset[str]] = {
+    RejectReason.TRANSFER_INSUFFICIENT_CASH.value: frozenset({"amount", "cash"}),
+}
 
-def reject_reason_ja(err: dict[str, Any] | None) -> str | None:
+
+def reject_reason_ja(err: dict[str, Any] | None, config: GameConfig) -> str | None:
     """
     `visible_state["my_last_action_error"]`（{"code","params","message_en"}）を
     日本語の文に変換する（§7.5）。
 
     Args:
         err: None、または {"code": str, "params": dict, "message_en": str}
+        config: 利率（E1）など設定値の差し込み元。設定を変えた試合でも
+            テンプレートの説明が嘘にならないよう必須引数にする。
 
     Returns:
         err が None なら None。それ以外は日本語の文（戦い方の助言は含まない）。
@@ -178,4 +195,10 @@ def reject_reason_ja(err: dict[str, Any] | None) -> str | None:
         return None
     code = err.get("code")
     template = REASON_JA[code]
-    return template.format(**err.get("params", {}))
+    params = dict(err.get("params", {}))
+    for key in _MONEY_PARAM_KEYS.get(code, ()):
+        if key in params and isinstance(params[key], int) and not isinstance(params[key], bool):
+            params[key] = comma(params[key])
+    params.setdefault("interest_pct", pct(config.interest_rate_pre_num, config.interest_rate_pre_den))
+    params.setdefault("late_interest_pct", pct(config.interest_rate_post_num, config.interest_rate_post_den))
+    return template.format(**params)
