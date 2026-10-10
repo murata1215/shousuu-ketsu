@@ -4,7 +4,7 @@
 
 ## ドキュメント
 
-- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4_1.md`（v0.4.1。`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md`・`doc/..._v0_4.md` は履歴として残す。変更しない）。v0.4.1はv0.4からルールの変更はなく、サイクル4.0の結果を反映した書き直し（§11.6）
+- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4_2.md`（v0.4.2。`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md`・`doc/..._v0_4.md`・`doc/..._v0_4_1.md` は履歴として残す。変更しない）。v0.4.2はv0.4.1からルールの変更はなく、サイクル4.1の結果を反映した書き直し（§11.7）
 - 流用調査レポート: `doc/analysis/reuse_investigation.md`（サイクル0.1。`~/dangou-card`/`~/gentei-janken` からの流用方針・部品表・優劣・仕様書あいまい点16件・段取り案）
 - 受け入れテスト対応表: `doc/analysis/acceptance_v0_4.md`（サイクル4.0・4.1。v0.4.1 §12.3の54件とpytest関数の対応）
 - Bot検証レポート（v0.4）: `doc/analysis/bot_simulation_report_v0_4.md`（サイクル4.1。V1〜V10・机上計算との比較・暫定値を変えた場合の比較）
