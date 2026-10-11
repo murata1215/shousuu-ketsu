@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from pathlib import Path
 from typing import Any
@@ -447,8 +448,15 @@ def summarize_seats(
 ) -> list[dict[str, Any]]:
     """
     席ごとの最終資産・順位・借入額・呼び出し回数・無効な応答・時間切れ・
-    拒否(429)・自動代行・予算停止・所要時間・費用をまとめる（サイクル4.2b
-    で最終資産・順位・借入額を追加）。
+    拒否(429)・その他の失敗・自動代行・予算停止・所要時間・費用・送った
+    文面の字数・上限で省いた発言数・メモの字数をまとめる（サイクル4.2bで
+    最終資産・順位・借入額を追加。サイクル4.2cでその他の失敗・文面・
+    省略件数・メモの統計を追加）。
+
+    「その他の失敗」（other_errors）は、時間切れ・拒否429のどちらでもない
+    失敗（HTTP 400等、llm/adapters.py::_classify_errorの"server_error"・
+    "connection_error"・"other"）。試走でこの列が無く、どこにも表示されない
+    失敗が1件あった不備の修正。
     """
     auto_commit_counts: dict[str, int] = {}
     budget_blocked_counts: dict[str, int] = {}
@@ -474,6 +482,8 @@ def summarize_seats(
             "auto_commits": auto_commit_counts.get(pid, 0),
             "budget_blocked": budget_blocked_counts.get(pid, 0),
             "elapsed_ms_total": 0.0, "cost_usd_total": 0.0,
+            "_user_prompt_chars": [], "messages_omitted_total": 0,
+            "_memory_chars": [], "memory_truncated_count": 0,
         }
 
     by_seat: dict[str, dict[str, Any]] = {pid: _base_row(pid, seat_map[pid]) for pid in sorted(seat_map)}
@@ -483,12 +493,21 @@ def summarize_seats(
         if pid is None:
             continue
         row = by_seat.setdefault(pid, _base_row(pid, entry.get("model_id")))
+        if entry.get("memory_record"):
+            row["_memory_chars"].append(entry.get("memory_chars") or 0)
+            if entry.get("memory_truncated"):
+                row["memory_truncated_count"] += 1
+            continue  # log_call()とは別件の軽量な注記行。呼び出し回数には数えない
         if entry.get("invalid_response"):
             row["invalid_responses"] += 1
             continue  # log_call()で記録済みの呼び出し1回に対する注記行であり、別件の呼び出しではない
         row["calls"] += 1
         row["elapsed_ms_total"] += entry.get("elapsed_ms") or 0.0
         row["cost_usd_total"] += entry.get("cost_usd") or 0.0
+        row["messages_omitted_total"] += entry.get("messages_omitted") or 0
+        user_prompt = entry.get("user_prompt")
+        if user_prompt is not None:
+            row["_user_prompt_chars"].append(len(user_prompt))
         error_type = entry.get("error_type")
         if error_type == "timeout":
             row["timeouts"] += 1
@@ -497,7 +516,17 @@ def summarize_seats(
         elif error_type is not None:
             row["other_errors"] += 1
 
-    return [by_seat[pid] for pid in sorted(by_seat)]
+    result = []
+    for pid in sorted(by_seat):
+        row = by_seat[pid]
+        chars = row.pop("_user_prompt_chars")
+        memory_chars = row.pop("_memory_chars")
+        row["user_prompt_chars_median"] = statistics.median(chars) if chars else None
+        row["user_prompt_chars_max"] = max(chars) if chars else None
+        row["memory_chars_median"] = statistics.median(memory_chars) if memory_chars else None
+        row["memory_chars_max"] = max(memory_chars) if memory_chars else None
+        result.append(row)
+    return result
 
 
 def _print_roster(roster: list[dict[str, Any]]) -> None:
@@ -646,7 +675,8 @@ def _print_seats(seats: list[dict[str, Any]]) -> None:
     print("\n--- 席ごとの呼び出し統計 ---")
     print(
         f"{'席':<6}{'モデルID':<34}{'最終資産':>13}{'順位':>5}{'借入額':>12}{'呼出':>5}{'無効':>5}"
-        f"{'時間切れ':>7}{'拒否429':>7}{'自動代行':>7}{'予算停止':>7}{'所要時間':>10}{'費用($)':>9}",
+        f"{'時間切れ':>7}{'拒否429':>7}{'その他':>7}{'自動代行':>7}{'予算停止':>7}"
+        f"{'所要時間':>10}{'費用($)':>9}",
     )
     for s in seats:
         assets = f"{s['final_assets']:,}" if s["final_assets"] is not None else "-"
@@ -655,8 +685,32 @@ def _print_seats(seats: list[dict[str, Any]]) -> None:
         print(
             f"{s['player_id']:<6}{(s['model_id'] or ''):<34}{assets:>13}{rank:>5}{loan:>12}"
             f"{s['calls']:>5}{s['invalid_responses']:>5}"
-            f"{s['timeouts']:>7}{s['rate_limited']:>7}{s['auto_commits']:>7}{s['budget_blocked']:>7}"
+            f"{s['timeouts']:>7}{s['rate_limited']:>7}{s['other_errors']:>7}"
+            f"{s['auto_commits']:>7}{s['budget_blocked']:>7}"
             f"{s['elapsed_ms_total']:>8.0f}ms{s['cost_usd_total']:>9.4f}",
+        )
+
+
+def _print_seat_text_stats(seats: list[dict[str, Any]]) -> None:
+    """席ごとの文面の字数・上限で省いた発言数・メモの字数の統計（サイクル4.2c）"""
+    print("\n--- 席ごとの文面・メモ統計 ---")
+    print(
+        f"{'席':<6}{'文面字数(中央値)':>14}{'文面字数(最大)':>12}{'省略件数':>8}"
+        f"{'メモ字数(中央値)':>14}{'メモ字数(最大)':>12}{'メモ切捨':>8}",
+    )
+    for s in seats:
+        pm = s["user_prompt_chars_median"]
+        px = s["user_prompt_chars_max"]
+        mm = s["memory_chars_median"]
+        mx = s["memory_chars_max"]
+        print(
+            f"{s['player_id']:<6}"
+            f"{(f'{pm:.0f}' if pm is not None else '-'):>14}"
+            f"{(f'{px}' if px is not None else '-'):>12}"
+            f"{s['messages_omitted_total']:>8}"
+            f"{(f'{mm:.0f}' if mm is not None else '-'):>14}"
+            f"{(f'{mx}' if mx is not None else '-'):>12}"
+            f"{s['memory_truncated_count']:>8}",
         )
 
 
@@ -709,6 +763,7 @@ def main() -> None:
     _print_contracts(contracts)
     _print_final(final)
     _print_seats(seats)
+    _print_seat_text_stats(seats)
     if reflections:
         print("\n--- 試合後の振り返り ---")
         for pid in sorted(reflections):

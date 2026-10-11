@@ -22,9 +22,10 @@ v0.4の記録は `logs/llm_v0_4/` に出す（既定）。公開中のビュー�
         --negotiation-max-turns-first 2 --negotiation-max-turns-next 2 --negotiation-max-turns-retry 1 \\
         --parallel 2 --per-seat-cap-usd 0.05 --game-cap-usd 0.12 --game-id smoke4_2001
 
-    # 12席・R1だけの本走り（人間がフォアグラウンドで起動する想定）
+    # 12席・R1だけの本走り（人間がフォアグラウンドで起動する想定。サイクル4.2cで
+    # Sonnet・Haikuの2席をDevRelay経由からAPI直結（M1・L1）に替えた）
     uv run python scripts/llm_trial.py \\
-        --roster "DR_FABLE,DR_OPUS,DR_SONNET5,DR_SOL,DR_TERRA,DR_LUNA,L1,L2,L3,L4,L5,L6" \\
+        --roster "DR_FABLE,DR_OPUS,M1,L1,DR_SOL,DR_TERRA,DR_LUNA,L2,L3,L4,L5,L6" \\
         --seed 2001 --stop-after-round 1 --parallel 4 \\
         --per-seat-cap-usd 0.5 --game-cap-usd 3.0 --game-id r1_12p_2001
 """

@@ -10,10 +10,16 @@ def usage_cost(model: ModelInfo, usage: dict[str, Any]) -> float:
 
     Anthropicだけは input_tokens と cache_read_input_tokens を別建てで
     返すため、estimate_cost()へ渡す前に合算する。
+
+    cache_creation_input_tokens（キャッシュ書き込み、サイクル4.2c）は
+    input_tokens/total_tokensとは独立に、そのままestimate_cost()へ渡す
+    （入力単価の1.25倍で課金される別建ての金額。total_tokensには元々
+    含まれていない——Anthropicのadapterはtotal_tokens=input+outputのみ）。
     """
     input_tokens = usage.get("input_tokens", 0) or 0
     output_tokens = usage.get("output_tokens", 0) or 0
     cache_read = usage.get("cache_read_input_tokens", 0) or 0
+    cache_creation = usage.get("cache_creation_input_tokens", 0) or 0
     total_tokens = usage.get("total_tokens", 0) or 0
     if model.adapter_type == "anthropic":
         input_tokens += cache_read
@@ -23,6 +29,7 @@ def usage_cost(model: ModelInfo, usage: dict[str, Any]) -> float:
         model, input_tokens, output_tokens,
         cache_read_input_tokens=cache_read,
         total_tokens=total_tokens,
+        cache_creation_input_tokens=cache_creation,
     )
 
 

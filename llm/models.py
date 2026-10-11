@@ -31,6 +31,12 @@ _PROVIDER_TO_VENDOR: dict[str, str] = {
 TIER_ORDER: tuple[str, ...] = ("H", "M", "L")
 VENDOR_ORDER: tuple[str, ...] = ("Anthropic", "OpenAI", "Google", "xAI", "Moonshot", "DeepSeek")
 
+# サイクル4.2c: Anthropicのプロンプトキャッシュ書き込み（cache_creation）は
+# 入力単価の1.25倍（公式料金表、2026-10-11確認）。estimate_cost()が
+# cache_creation_input_tokensを受け取って課金する唯一の場所で、倍率は
+# ここ1か所だけに持つ。
+CACHE_WRITE_PRICE_MULTIPLIER: float = 1.25
+
 
 @dataclass
 class ModelInfo:
@@ -89,7 +95,9 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         # 2026-09-01以降は要再確認（Sonnet 4.6相当 $3/$15 になる可能性）。数値は変更しない。
         env_key="CLAUDE_API_KEY", base_url=None,
         supports_temperature=False,
-        # cached_input_price: 記載なし→input同値（安全側）
+        cached_input_price=0.20,  # サイクル4.2c: 未設定のままだとキャッシュ読みを
+        # 入力単価と同値（過大）に計上してしまうため設定。Anthropic公式料金表
+        # 2026-10-11確認（Sonnet系はキャッシュ読み=入力単価の1/10）。
         tier="M",
     ),
     "M2": ModelInfo(
@@ -588,6 +596,7 @@ def estimate_cost(
     output_tokens: int,
     cache_read_input_tokens: int = 0,
     total_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
 ) -> float:
     """
     トークン数からコスト（USD）を概算する
@@ -595,6 +604,12 @@ def estimate_cost(
     Stage 2: キャッシュ割引・thinking トークン内訳に対応。
     - cache_read_input_tokens: キャッシュヒット入力トークン数（割引単価適用）
     - total_tokens: 全トークン合計（0の場合 input+output で代用）
+    - cache_creation_input_tokens: キャッシュ書き込み（新規作成）トークン数。
+      入力単価の CACHE_WRITE_PRICE_MULTIPLIER 倍で課金する（サイクル4.2c新設。
+      それまでusage/ログには記録していたが金額に一切入っていなかった
+      計上漏れの修正）。input_tokens/cache_read_input_tokensとは独立した
+      別建ての課金（二重計上ではない。Anthropicは書き込みと読み込みを
+      別のトークン数として返す）。
 
     二重計上防止:
       separate_thinking = max(0, total_tokens - input_tokens - output_tokens)
@@ -615,6 +630,9 @@ def estimate_cost(
     uncached_input = input_tokens - cache_read_input_tokens
     input_cost = uncached_input * model.input_price + cache_read_input_tokens * effective_cached_price
 
+    # キャッシュ書き込みコスト（入力単価の1.25倍、サイクル4.2c）
+    cache_write_cost = cache_creation_input_tokens * model.input_price * CACHE_WRITE_PRICE_MULTIPLIER
+
     # 出力コスト
     output_cost = output_tokens * model.output_price
 
@@ -623,4 +641,4 @@ def estimate_cost(
     separate_thinking = max(0, effective_total - input_tokens - output_tokens)
     thinking_cost = separate_thinking * effective_reasoning_price
 
-    return (input_cost + output_cost + thinking_cost) / 1_000_000
+    return (input_cost + cache_write_cost + output_cost + thinking_cost) / 1_000_000

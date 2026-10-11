@@ -282,6 +282,51 @@ def test_summarize_trial_builds_tables_from_known_records(tmp_path):
     assert isinstance(reflections, dict)
 
 
+def test_summarize_seats_classifies_other_errors_and_reconciles_failure_counts() -> None:
+    """
+    サイクル4.2c: 時間切れ・拒否429のどちらでもない失敗（HTTP 400等）が
+    「その他の失敗」（other_errors）に数えられ、失敗の合計が記録の件数と
+    合うこと。あわせてmessages_omitted・メモの統計も席ごとに集計されること
+    を確認する（試走でother_errorsがどの列にも出ていなかった不備の修正）。
+    """
+    seat_map = {"P01": "model-x"}
+    llm_calls = [
+        {
+            "player_id": "P01", "user_prompt": "あ" * 500, "elapsed_ms": 10.0,
+            "cost_usd": 0.01, "error_type": None, "messages_omitted": 3,
+        },
+        {"player_id": "P01", "user_prompt": "い" * 300, "elapsed_ms": 20.0,
+         "cost_usd": 0.02, "error_type": None, "messages_omitted": 0},
+        {"player_id": "P01", "error_type": "timeout", "elapsed_ms": 162_000.0, "user_prompt": "う" * 400},
+        {"player_id": "P01", "error_type": "rate_limit", "elapsed_ms": 500.0, "user_prompt": "え" * 400},
+        {"player_id": "P01", "error_type": "server_error", "elapsed_ms": 50.0, "user_prompt": "お" * 400},
+        {"player_id": "P01", "invalid_response": True, "reason": "bad json"},
+        {"player_id": "P01", "memory_record": True, "memory_chars": 1_200, "memory_truncated": True},
+        {"player_id": "P01", "memory_record": True, "memory_chars": 800, "memory_truncated": False},
+    ]
+
+    seats = summarize_seats([], llm_calls, seat_map)
+    assert len(seats) == 1
+    s = seats[0]
+
+    assert s["timeouts"] == 1
+    assert s["rate_limited"] == 1
+    assert s["other_errors"] == 1  # server_errorはtimeout/rate_limitのどちらでもない
+    assert s["invalid_responses"] == 1
+    assert s["calls"] == 5  # 成功2件＋失敗3件（invalid_response・memory_recordは別件扱い）
+
+    # 失敗の合計が記録の件数と合う
+    error_entries = [c for c in llm_calls if c.get("error_type") is not None]
+    assert s["timeouts"] + s["rate_limited"] + s["other_errors"] == len(error_entries)
+
+    assert s["messages_omitted_total"] == 3
+    assert s["user_prompt_chars_median"] == 400  # [500, 300, 1, 1, 1] の中央値
+    assert s["user_prompt_chars_max"] == 500
+    assert s["memory_chars_median"] == 1_000  # [1200, 800] の中央値
+    assert s["memory_chars_max"] == 1_200
+    assert s["memory_truncated_count"] == 1
+
+
 # --- max_parallel_agents=1 と >1 で結果が一致すること ---
 
 def test_run_trial_parallel_matches_sequential_result(tmp_path):
