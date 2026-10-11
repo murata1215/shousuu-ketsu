@@ -1,6 +1,6 @@
-# 受け入れテスト対応表（v0.4.2 §12.3、サイクル4.0・4.1・4.2）
+# 受け入れテスト対応表（v0.4.3 §12.3、サイクル4.0・4.1・4.2・4.2c）
 
-仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_2.md` §12.3 の57件すべてに
+仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_3.md` §12.3 の66件すべてに
 対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 （`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48は出題AI・履歴ファイル
 （`llm/questions.py`）の対応がサイクル4.2bで完了し、合格になった（下記注2参照）。
@@ -10,7 +10,13 @@
 修正は実装済み）。#57も同#4で追加され実装済み（§7.5「不成立の理由を
 日本語の文で本人にだけ渡す」の確認。engine/actions.py::RejectReason・
 engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
-対応）。
+対応）。#58〜#66はサイクル4.2cで追加された（v0.4.3 §11.8。本人・当事者だけに
+渡すお金の出入りの記録・義務ごとの状態・契約の表示範囲・文面の15,000字上限・
+試合後振り返り・署名済み表示・メモ1,000字上限の確認。対応は
+`tests/test_acceptance_58_to_66.py`）。v0.4.3はv0.4.2からルールの変更はなく、
+サイクル4.2の結果を反映した書き直し（#55・#56の文言更新、#58〜#66の追加）
+で、#1〜#57の実装はそのまま（CLAUDE.mdの「v0.4.2はv0.4.1からルールの変更は
+ない」と同じ位置づけ）。
 
 | # | 場面（仕様書の表現） | pytest関数 | 状態 |
 | --- | --- | --- | --- |
@@ -69,13 +75,22 @@ engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 | 53 | R1V3の交渉中。R2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_53_vote_and_round_history_accumulate_across_the_game` | 合格 |
 | 54 | 形式に合わない提案をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_54_rejection_reason_only_to_proposer` | 合格 |
 | 55 | R1V2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_55_round_conversation_carries_across_votes` | 合格 |
-| 56 | R1の終わりの振り返り。R2V1の交渉中 | `tests/test_public_disclosure.py::test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty` | 合格 |
+| 56 | R1V1が決着してV2へ続くとき。R1の最後の投票の後 | `tests/test_public_disclosure.py::test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty` | 合格 |
 | 57 | 手持ちを超える送金をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only` | 合格 |
+| 58 | P01がP02へ30万を送金した、次の手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_58_transfer_recorded_only_for_sender_and_receiver` | 合格 |
+| 59 | R1V1で型B違反があり、ラウンドがV2へ続く | `tests/test_acceptance_58_to_66.py::test_acceptance_59_type_b_penalty_visible_to_parties_only` | 合格 |
+| 60 | R1の終わりに、割合契約（25%）の支払いと、払いきれなかった型Aがある | `tests/test_acceptance_58_to_66.py::test_acceptance_60_round_settlement_payments_visible_with_payout_and_interest` | 合格 |
+| 61 | R1V1を対象にした型Cが支払われた後の、R1V2 | `tests/test_acceptance_58_to_66.py::test_acceptance_61_type_c_payment_moves_obligation_to_paid_in_my_contract_status` | 合格 |
+| 62 | 試合後の振り返り | `tests/test_acceptance_58_to_66.py::test_acceptance_62_post_game_reflection_carries_results_ranks_and_cash_flow` | 合格 |
+| 63 | P01が提案して署名済みの提案が、P02の署名待ちで残っている手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_63_signed_proposal_shows_signed_status_not_sign_method` | 合格 |
+| 64 | 会話が積み上がり、省かなければ文面が15,000字を超える手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_64_old_messages_omitted_when_body_exceeds_limit` | 合格 |
+| 65 | R1ですべての義務が済んだ契約と、R2を対象にした型Aが残っている契約がある、R2V1 | `tests/test_acceptance_58_to_66.py::test_acceptance_65_fully_settled_contract_hidden_pending_contract_shown` | 合格 |
+| 66 | 振り返りで、1,000字を超えるメモを返した。別の席が、交渉の応答にメモを入れて返した | `tests/test_acceptance_58_to_66.py::test_acceptance_66_memory_truncated_at_1000_and_not_updated_by_negotiate_response` | 合格 |
 
 ## 集計
 
-- 合格: 57件（#1〜#57）。skipは0件
-- 1件も省いていない（#1〜#57がすべて表に存在する）
+- 合格: 66件（#1〜#66）。skipは0件
+- 1件も省いていない（#1〜#66がすべて表に存在する）
 
 ## 注1: #42（v0.4.1での仕様書修正の反映）
 
@@ -129,6 +144,18 @@ YES_LEAN`）・NO寄り（`FALLBACK_QUESTIONS_NO_LEAN`、各30問以上）の2�
   作る。未知のコードを渡すとKeyErrorで落ちる設計にし、理由コードを足した
   のに日本語テンプレートを書き忘れた場合に機械的に検出する
   （`tests/test_reasons.py::test_every_reject_reason_has_japanese`）。
+
+## 注4: サイクル4.2cで見つかった文面の壊れ（A-1〜A-5）
+
+#58〜#66の実装後、実際に文面を出力して読んだところ、受け入れ番号には
+出てこない文面の不具合が5件見つかった（`llm/prompt_builder.py::
+_obligation_status_sentence`の「はが」「はの」「へ済み」という壊れた日本語、
+メモ未作成の案内が古い、お金の出入りの各行に「いつ」が出ない、精算内の
+記録順、振り返りのmax_tokens不足）。部分一致のテストだけでは検出できな
+かったため（CLAUDE.md落とし穴⑭参照）、`tests/test_obligation_sentences.py`
+で72通り（義務の種類6×状態6×自分/相手）を全文一致で固定し、
+`doc/analysis/prompt_samples_v0_4.md`に見本4つ（8〜11）を足して実際の
+文面を目で確認する運用に変えた。
 
 ## 既存エンジンテストとの関係
 

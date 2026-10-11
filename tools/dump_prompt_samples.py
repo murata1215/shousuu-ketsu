@@ -1,5 +1,5 @@
 """
-文面の見本を作るコマンド（サイクル4.2b B9）
+文面の見本を作るコマンド（サイクル4.2b B9、サイクル4.2cで4つ追加）
 
 AIは一切呼ばない。固定シードで動かした試合の実際の`visible_state`から、
 `llm/prompt_builder.py`の各build_*関数で文面を組み立て、
@@ -10,7 +10,7 @@ AIは一切呼ばない。固定シードで動かした試合の実際の`visib
 importせず、台本どおりに動く最小限のエージェントをこのファイル内だけに
 用意する。
 
-見本7つ:
+見本11つ:
   1. ルール全文（システムプロンプト）
   2. 借入額を聞く文面
   3. R1V1・1巡目の交渉
@@ -19,6 +19,11 @@ importせず、台本どおりに動く最小限のエージェントをこの�
   5. R1V2 の投票（Commit）
   6. R1 の終わりの振り返り
   7. R3V1 の交渉（全員の順位が公開された後）
+  8. R1V1 の振り返り（ラウンドがV2へ続く場面）
+  9. 続く R1V2 の交渉（V1の会話が入らず、メモが入っている）
+  10. R2V1 の交渉（R1で送金を受け取り、割合契約の支払いを受け、型Aを
+      払い終えたプレイヤー。前のラウンドで全義務が済んだ契約は出ない）
+  11. 上限に届いて古い発言が省かれた、R1V1 終盤の交渉
 
 使用方法:
     uv run python tools/dump_prompt_samples.py
@@ -128,12 +133,28 @@ def _build_fixture() -> tuple[Game, dict[str, _Recorder], GameConfig]:
     4ラウンドぶんの筋書きを持つ固定シードの試合を組み立てる（AIは呼ばない）。
 
     R1V1: YES(minority,5)=P01,P03,P05,P07,P09 残る / NO(majority,7)=退場
-    R1V2: YES(minority,2)=P01,P07 残る・勝ち残り / NO(3)=P03,P05,P09 退場
-      - P01がP07へ型A契約（R1終了時200,000円）を提案・署名（V1）
+      - P01がP07へ型A契約（R1終了時200,000円）を提案・署名（1巡目・2巡目）
       - P07がV1の1巡目に全体発言
+      - P03がP01へ送金30,000円（3巡目）
+      - P07がP01へ型C(wins_round・割合10%)契約を提案・署名（3巡目・4巡目）
+      - P01がP07へ3種の義務を持つ契約（型A・R1払い150,000円／型B・R1V2は
+        YES／型A・R2払い400,000円）を提案・署名（5巡目・6巡目）。見本10
+        （R2V1の交渉）で、済んだ義務・型Bを守った義務・これからの義務が
+        それぞれ1本以上そろうようにするための契約（B-1）
+      - 1〜9巡目は全員が長い全体発言をする（既存の指定が無い巡だけ。
+        見本11の「上限に届いて古い発言が省かれる」場面を作るための会話量）
+    R1V2: YES(minority,2)=P01,P07 残る・勝ち残り / NO(3)=P03,P05,P09 退場
       - P02（V1で退場済み）がV2の1巡目に手持ちを超える送金を試みて不成立
+      - P01はYESに投票（上記契約の型B義務を守る）
     R2V1: NO(minority,2)=P01,P07 残る・勝ち残り / YES(10)=退場
       - R2終了後に全員の順位が公開される（config.rank_public_rounds=(2,)）
+      - R1でP01が当事者だった契約のうち、型A(R1終了時200,000円)・型C
+        (wins_round割合10%)は両方ともR1の精算で全義務が済んでおり、
+        R2V1の時点ではmy_contract_statusに出ない（§11.8 #10）。5巡目・
+        6巡目で結んだ3種義務の契約は、型A(R1払い)が済み・型Bが守った済みに
+        なった一方、型A(R2払い)がまだ「これから」なので、契約自体は
+        R2V1でも表示に残る（Game._contract_status_viewがこれからの義務の
+        有無で判定するため）
     R3V1: 任意（サンプル取得後の進行は問わない）
     """
     config = GameConfig.default_12()
@@ -161,10 +182,47 @@ def _build_fixture() -> tuple[Game, dict[str, _Recorder], GameConfig]:
     negotiate_actions["P07"][(1, 1, 1)] = BroadcastAction(
         player_id="P07", message="最初はYESでそろえたい。乗る人はDMをくれ。",
     )
+    negotiate_actions["P03"][(1, 1, 3)] = TransferAction(player_id="P03", to="P01", amount=30_000)
+    negotiate_actions["P07"][(1, 1, 3)] = ContractProposeAction(
+        player_id="P07", with_players=["P01"],
+        terms=[{"obligor": "P07", "counterparty": "P01", "ob_type": "type_c_conditional",
+                "round_num": 1,
+                "details": {"share_percent": 10, "condition_type": "wins_round",
+                            "condition": {"target_player": "P07"}}}],
+    )
     negotiate_actions["P02"][(1, 2, 1)] = TransferAction(player_id="P02", to="P08", amount=50_000_000)
+
+    # 見本10（お金の出入りが入ったR2V1の交渉）用に、済んだ義務（型A・R1払い）・
+    # 型Bを守った義務（R1V2のYES）・これからの義務（型A・R2払い）が1本ずつ
+    # そろう契約を、P01がP07へ提案・署名する（B-1）。
+    negotiate_actions["P01"][(1, 1, 5)] = ContractProposeAction(
+        player_id="P01", with_players=["P07"],
+        terms=[
+            {"obligor": "P01", "counterparty": "P07", "ob_type": "type_a_payment",
+             "round_num": 1, "details": {"amount": 150_000}},
+            {"obligor": "P01", "counterparty": "P07", "ob_type": "type_b_vote",
+             "round_num": 1, "vote_num": 2, "details": {"vote": "YES"}},
+            {"obligor": "P01", "counterparty": "P07", "ob_type": "type_a_payment",
+             "round_num": 2, "details": {"amount": 400_000}},
+        ],
+    )
+
+    # 見本11（上限に届いて古い発言が省かれる場面）用に、R1V1の1〜9巡目は
+    # 全員が長めの全体発言をする（既に別の行動が指定されている巡は上書きしない）。
+    for turn in range(1, 10):
+        for pid in all_ids:
+            negotiate_actions[pid].setdefault(
+                (1, 1, turn),
+                BroadcastAction(
+                    player_id=pid,
+                    message=f"{pid}の{turn}巡目の発言。" + "あ" * 280,
+                ),
+            )
 
     sign_proposer_at: dict[str, dict[tuple[int, int, int], str]] = {pid: {} for pid in all_ids}
     sign_proposer_at["P07"][(1, 1, 2)] = "P01"
+    sign_proposer_at["P01"][(1, 1, 4)] = "P07"
+    sign_proposer_at["P07"][(1, 1, 6)] = "P01"
 
     agents: dict[str, PlayerAgent] = {
         pid: _ScriptedAgent(
@@ -194,6 +252,15 @@ def main() -> None:
     p01_reflect = recorders["P01"].reflect_snapshots
     p02_neg = recorders["P02"].negotiate_snapshots
 
+    # 見本9: R1V1の振り返りで本人が書いたメモ（台本エージェントは実際には
+    # メモを書かないため、R1V2の文面を組み立てる入力として明示的に渡す。
+    # エンジンのvisible_stateにメモは一切含まれない——メモはLLMAgent側の
+    # 状態であり文面層へ引数で渡る、§9.4）。
+    sample_memory = (
+        "R1V1: P07と組んでYESでそろえ、5人残った（決着）。P07への型A20万の"
+        "契約と、P07からの型C割合10%の契約がどちらも成立。V2もP07と組む方針。"
+    )
+
     samples: list[tuple[str, str]] = [
         ("1. ルール全文（システムプロンプト）", build_system_prompt("P01", config)),
         ("2. 借入額を聞く文面", build_loan_prompt(config)),
@@ -220,10 +287,31 @@ def main() -> None:
             "7. R3V1 の交渉（全員の順位が公開された後）",
             build_negotiation_prompt(_player("P01"), 3, 1, 1, p01_neg[(3, 1, 1)], config).text,
         ),
+        (
+            "8. R1V1 の振り返り（ラウンドがV2へ続く場面）",
+            build_reflection_prompt(
+                _player("P01"), 1, 1, p01_reflect[(1, 1)], config, is_round_end=False,
+            ).text,
+        ),
+        (
+            "9. 続く R1V2 の交渉（V1の会話が入らず、メモが入っている）",
+            build_negotiation_prompt(
+                _player("P01"), 1, 2, 1, p01_neg[(1, 2, 1)], config, memory=sample_memory,
+            ).text,
+        ),
+        (
+            "10. R2V1 の交渉（R1で送金を受け取り、割合契約の支払いを受け、型Aを"
+            "払い終えたプレイヤー。前のラウンドで全義務が済んだ契約はここに出ない）",
+            build_negotiation_prompt(_player("P01"), 2, 1, 1, p01_neg[(2, 1, 1)], config).text,
+        ),
+        (
+            "11. 上限に届いて古い発言が省かれた、R1V1 終盤の交渉",
+            build_negotiation_prompt(_player("P01"), 1, 1, 10, p01_neg[(1, 1, 10)], config).text,
+        ),
     ]
 
     lines = [
-        "# プロンプト文面の見本（v0.4、サイクル4.2b）",
+        "# プロンプト文面の見本（v0.4.3、サイクル4.2c）",
         "",
         "`tools/dump_prompt_samples.py`が、固定シードの試合（AIは呼ばない。"
         "台本どおりに動くエージェント）の実際の`visible_state`から"
@@ -235,7 +323,7 @@ def main() -> None:
         lines.append(_section(title, body))
 
     OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    print(f"見本7つを {OUT_PATH} へ保存しました。")
+    print(f"見本{len(samples)}つを {OUT_PATH} へ保存しました。")
 
 
 if __name__ == "__main__":
