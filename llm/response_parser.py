@@ -182,6 +182,22 @@ def extract_memory(text: str) -> MemoryResult | None:
     )
 
 
+def _strip_contract_id_prefix(contract_id: str) -> str:
+    """
+    contract_signのcontract_idの前後の空白を取り、先頭の「契約」の字と
+    その直後の空白だけを外す（§9.2、v0.4.4 §11.9 #4、#68）。
+
+    文面の「契約C_…」という表示をそのまま写して送る誤りが2回目の12席
+    試走で2件あった（§12.10）。それ以外の書き間違い（別のID・全角の
+    文字など）はここでは変えず、エンジンが今までどおり不成立にする
+    （contract_not_foundとして理由が本人に通知される）。
+    """
+    stripped = contract_id.strip()
+    if stripped.startswith("契約"):
+        stripped = stripped[len("契約"):].lstrip()
+    return stripped
+
+
 def parse_response(text: str, player_id: str, phase: str) -> tuple[dict[str, Any] | None, Action]:
     """
     §13.1のアクション形式 {"strategy": {...}, "action": {...}} を解析する
@@ -485,6 +501,12 @@ def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
     if action_type == "contract_sign":
         contract_id = data.get("contract_id")
         if not isinstance(contract_id, str) or not contract_id:
+            raise ParseError(
+                "contract_signにcontract_idが必要です",
+                '例: {"type": "contract_sign", "contract_id": "C_XXXXXXXX"}',
+            )
+        contract_id = _strip_contract_id_prefix(contract_id)
+        if not contract_id:
             raise ParseError(
                 "contract_signにcontract_idが必要です",
                 '例: {"type": "contract_sign", "contract_id": "C_XXXXXXXX"}',

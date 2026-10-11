@@ -201,6 +201,29 @@ def test_parse_contract_sign():
     assert action.contract_id == "C_ABC12345"
 
 
+def test_parse_contract_sign_strips_leading_contract_kanji_prefix():
+    """#68: 文面の「契約C_…」という表示をそのまま写した契約IDも受け付ける（§9.2）"""
+    _, action = parse_response(
+        _wrap({"type": "contract_sign", "contract_id": "契約C_ABC12345"}), "P01", "negotiation",
+    )
+    assert isinstance(action, ContractSignAction)
+    assert action.contract_id == "C_ABC12345"
+
+
+def test_parse_contract_sign_only_strips_leading_contract_kanji_once():
+    """「契約」は先頭の1語だけを外す。別の書き間違い（例: 全角混じり）はそのまま通す"""
+    _, action = parse_response(
+        _wrap({"type": "contract_sign", "contract_id": " 契約 C_ABC12345 "}), "P01", "negotiation",
+    )
+    assert action.contract_id == "C_ABC12345"
+
+    _, action2 = parse_response(
+        _wrap({"type": "contract_sign", "contract_id": "契約契約C_ABC12345"}), "P01", "negotiation",
+    )
+    # 2回繰り返した「契約契約」は先頭の1語分だけ外す（それ以外の書き間違いは変えない）
+    assert action2.contract_id == "契約C_ABC12345"
+
+
 def test_parse_strategy_with_valid_emotion_preserved():
     strategy, _ = parse_response(
         _wrap({"type": "pass"}, strategy={"reason": "r", "emotion": "喜"}), "P01", "negotiation",

@@ -1,9 +1,11 @@
 """
-受け入れテスト#58〜#66（v0.4.3 §12.3、サイクル4.2c）
+受け入れテスト#58〜#68（v0.4.4 §12.3、サイクル4.2c・4.2d）
 
 B（お金の出入りの記録・義務ごとの状態・失効した提案）とC-8（手番の文面の
 上限）・A（会話とメモの投票ごとの引き継ぎ）の確認。#55・#56は
-tests/test_public_disclosure.pyで書き直し済み。
+tests/test_public_disclosure.pyで書き直し済み。#67（署名待ちの提案の
+2つの見出し）・#68（契約IDの「契約」除去）はサイクル4.2dで追加した
+（v0.4.4 §11.9 #3・#4）。
 """
 
 from __future__ import annotations
@@ -14,11 +16,11 @@ from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.game import Game
 from engine.models import (
-    BroadcastAction, ContractProposeAction, PlayerState, TransferAction, Vote,
+    Action, BroadcastAction, ContractProposeAction, PlayerState, TransferAction, Vote,
 )
 from llm.constants import MEMORY_TRUNCATE_LENGTH, TURN_PROMPT_MAX_CHARS
 from llm.prompt_builder import build_negotiation_prompt, build_reflection_prompt
-from llm.response_parser import extract_memory
+from llm.response_parser import extract_memory, parse_response
 from tests.helpers import ScriptedAgent, VisibleStateRecordingAgent, make_roster
 
 
@@ -376,10 +378,14 @@ def test_acceptance_63_signed_proposal_shows_signed_status_not_sign_method() -> 
     text01 = build_negotiation_prompt(_ps("P01"), 1, 1, 2, vs01, config).text
     text02 = build_negotiation_prompt(_ps("P02"), 1, 1, 2, vs02, config).text
 
+    # サイクル4.2d: 署名待ちの提案は2つの見出しに分かれる（§7.5）。見出し
+    # 自体に「あなたは署名済み」の文字が含まれるため、各提案の状態行
+    # （4字インデント付き）で判定する
+    signed_status_line = "    あなたは署名済み"
     sign_instruction = "署名するには"
-    assert "あなたは署名済み" in text01
+    assert signed_status_line in text01
     assert sign_instruction not in text01  # 署名の送り方は出ない（アクション形式の説明文は別）
-    assert "あなたは署名済み" not in text02
+    assert signed_status_line not in text02
     assert sign_instruction in text02
     assert "未署名: P02" in text02
 
@@ -532,3 +538,133 @@ def test_acceptance_66_memory_truncated_at_1500_and_not_updated_by_negotiate_res
     # （llm/llm_agent.pyのnegotiate/commitからextract_memory呼び出しを削除済み。
     # tests/test_llm_agent.py::test_negotiate_response_memory_field_does_not_update_memory
     # が実機能として固定している）。
+
+
+def test_acceptance_67_pending_proposals_split_into_two_headings() -> None:
+    """
+    #67: P01が提案して署名済みの提案と、P03が提案してP01の署名を待っている
+    提案が、同時にある手番 → P01に渡す文面で、2つが別の見出しの下に出ている。
+    前者には署名の送り方が出ず、後者には出ている（§7.5、v0.4.4 §11.9 #3）。
+    見出しの位置で確かめる（部分一致だけにしない）。
+    """
+    agents = make_roster({}, num_players=12)
+    # 契約A: P01が提案（自動で署名済み）、P02は未署名のまま残す
+    agents["P01"].negotiate_actions[(1, 1, 1)] = ContractProposeAction(
+        player_id="P01", with_players=["P02"],
+        terms=[{"obligor": "P01", "counterparty": "P02", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 100_000}}],
+    )
+    # 契約B: P03が提案（自動で署名済み）、P01は未署名のまま残す。同じ巡目
+    # （毎巡全員が手番を持つため、turn=1の中で両方が提案される。§7.2手順2）
+    agents["P03"].negotiate_actions[(1, 1, 1)] = ContractProposeAction(
+        player_id="P03", with_players=["P01"],
+        terms=[{"obligor": "P03", "counterparty": "P01", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 200_000}}],
+    )
+    rec01 = VisibleStateRecordingAgent(agents["P01"])
+    agents["P01"] = rec01
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=67, logger=EventLogger())
+    game.run()
+
+    by01 = _negotiate_snapshots_by_key(rec01)
+    vs01 = by01[(1, 1, 2)]
+    pending = vs01["contracts_pending"]
+    contract_a = next(c for c in pending if c["proposer"] == "P01")  # P01が署名済み
+    contract_b = next(c for c in pending if c["proposer"] == "P03")  # P01が未署名
+
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 2, vs01, config).text
+
+    heading_unsigned = "## あなたの署名を待っている契約提案"
+    heading_signed = "## あなたは署名済みで、相手の署名を待っている契約提案"
+    idx_unsigned = text.index(heading_unsigned)
+    idx_signed = text.index(heading_signed)
+    assert idx_unsigned < idx_signed  # 順番もこのとおり（未署名が先、署名済みが後）
+
+    idx_next_heading = text.index("## 失効した契約提案", idx_signed)
+    unsigned_section = text[idx_unsigned:idx_signed]
+    signed_section = text[idx_signed:idx_next_heading]
+
+    # 契約B（P01が未署名）は「あなたの署名を待っている」見出しの下に出て、
+    # 署名の送り方も出る
+    assert contract_b["contract_id"] in unsigned_section
+    assert contract_b["contract_id"] not in signed_section
+    assert "署名するには" in unsigned_section
+
+    # 契約A（P01が署名済み）は「相手の署名を待っている」見出しの下に出て、
+    # 署名の送り方は出ない
+    assert contract_a["contract_id"] in signed_section
+    assert contract_a["contract_id"] not in unsigned_section
+    assert "署名するには" not in signed_section
+    assert "あなたは署名済み" in signed_section
+
+
+class _PrefixedSignAgent(ScriptedAgent):
+    """
+    #68用: sign_proposer_atで指定した提案に、実際にはparse_response()を
+    経由させて署名する。契約IDの前に「契約」を付けた文字列で送ることで、
+    本番のLLM応答と同じ経路（llm/response_parser.py）を実際に通す。
+    """
+
+    def negotiate(
+        self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
+    ) -> Action:
+        target_proposer = self.sign_proposer_at.get((round_num, vote_num, turn))
+        if target_proposer is not None:
+            for c in visible_state.get("contracts_pending", []):
+                if c["proposer"] == target_proposer and self.player_id not in c["signed_by"]:
+                    text = json.dumps({
+                        "strategy": {"reason": "sign", "emotion": "楽"},
+                        "action": {"type": "contract_sign", "contract_id": f"契約{c['contract_id']}"},
+                    }, ensure_ascii=False)
+                    _, action = parse_response(text, self.player_id, "negotiation")
+                    return action
+        return super().negotiate(player_state, round_num, vote_num, turn, visible_state)
+
+
+def test_acceptance_68_contract_sign_with_contract_kanji_prefix_still_succeeds() -> None:
+    """
+    #68: 署名の行動で、契約IDの前に「契約」の字を付けて送った → 「契約」を
+    外したIDとして受け付けられ、署名が成立する（§9.2、v0.4.4 §11.9 #4）。
+    _PrefixedSignAgentがllm/response_parser.pyを実際に経由させるので、本番の
+    LLM応答と同じ前処理を通る。
+    """
+    agents = make_roster({}, num_players=12)
+    agents["P01"].negotiate_actions[(1, 1, 1)] = ContractProposeAction(
+        player_id="P01", with_players=["P02"],
+        terms=[{"obligor": "P01", "counterparty": "P02", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 100_000}}],
+    )
+    p02 = agents["P02"]
+    agents["P02"] = _PrefixedSignAgent(
+        "P02", votes=p02.votes, loan=p02.loan, sign_proposer_at={(1, 1, 2): "P01"},
+    )
+    rec01 = VisibleStateRecordingAgent(agents["P01"])
+    agents["P01"] = rec01
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=68, logger=EventLogger())
+    game.run()
+
+    by01 = _negotiate_snapshots_by_key(rec01)
+    vs01 = by01[(1, 1, 3)]
+    # 署名が成立し、全当事者の署名がそろったので、もう署名待ちには出ない
+    assert vs01["contracts_pending"] == []
+    assert len(vs01["my_contract_status"]) == 1
+    assert vs01["my_contract_status"][0]["obligations"][0]["status"] != "expired"
+
+
+def test_acceptance_68_nonexistent_contract_id_rejected_without_doubled_kanji() -> None:
+    """
+    #68: 存在しないIDに「契約」を付けて署名を送った → 今までどおり不成立で、
+    理由の文にIDが二重に（「契約契約…」と）出ない
+    """
+    text = json.dumps({
+        "strategy": {"reason": "sign", "emotion": "楽"},
+        "action": {"type": "contract_sign", "contract_id": "契約C_NOTEXIST"},
+    }, ensure_ascii=False)
+    _, action = parse_response(text, "P01", "negotiation")
+    # 「契約」は外された状態でActionに渡る（エンジン側がcontract_not_foundと
+    # 判定する際の{cid}には、この外れた後の値が入るため、二重にならない）
+    assert action.contract_id == "C_NOTEXIST"

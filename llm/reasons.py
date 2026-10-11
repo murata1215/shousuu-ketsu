@@ -53,8 +53,8 @@ _ACTION_REASON_JA: dict[str, str] = {
     RejectReason.WITH_DUPLICATED.value: "契約の相手（with）に同じプレイヤーIDが重複していました。",
     RejectReason.UNKNOWN_COUNTERPARTY.value: "契約の相手の{pid}というプレイヤーはいません。",
     RejectReason.CONTRACT_NOT_FOUND.value: (
-        "契約{cid}は存在しません。署名できるのは「署名待ちの契約提案」に"
-        "出ている契約IDだけです。"
+        "契約{cid}は存在しません。署名できるのは「あなたの署名を待っている"
+        "契約提案」に出ている契約IDだけです。"
     ),
     RejectReason.NOT_A_PARTY.value: "契約{cid}の当事者ではないため、署名できません。",
     RejectReason.NOT_AWAITING_SIGNATURES.value: (

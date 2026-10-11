@@ -290,7 +290,7 @@ PROMPT_COVERAGE: dict[str, str] = {
     "round_contract_counts": "## このラウンドで成立した契約の本数（巡ごと）",
     "my_cash_flow": "## あなたのお金の出入り（本人のみ）",
     "my_contract_status": "## あなたが当事者の契約",
-    "contracts_pending": "## 署名待ちの契約提案",
+    "contracts_pending": "## あなたの署名を待っている契約提案",
     "my_expired_proposals": "## 失効した契約提案（署名がそろわなかったもの）",
     "messages": "## この投票の会話",
 }
@@ -839,41 +839,59 @@ def _render_cash_flow_block(visible_state: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _render_contract_pending_entry(
+    c: dict[str, Any], player_id: str, config: GameConfig, *, show_sign_method: bool,
+) -> list[str]:
+    """署名待ちの契約提案1件ぶんの描画（見出し2本の共通部分）"""
+    unsigned = [p for p in c["parties"] if p not in c["signed_by"]]
+    lines = [
+        f"  契約{c['contract_id']}（R{c['round_created']}V{c['vote_created']}提案、"
+        f"提案者: {c['proposer']}、当事者: {', '.join(c['parties'])}、"
+        f"未署名: {', '.join(unsigned) or 'なし'}）",
+    ]
+    for ob in c.get("obligations", []):
+        is_mine = ob["obligor"] == player_id
+        lines.append(f"    - {_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}")
+    if show_sign_method:
+        lines.append(
+            f'    署名するには {{"type": "contract_sign", "contract_id": "{c["contract_id"]}"}} を送る',
+        )
+    else:
+        lines.append("    あなたは署名済み")
+    return lines
+
+
 def _render_contracts_pending_block(
     visible_state: dict[str, Any], player_id: str, config: GameConfig,
 ) -> list[str]:
     """
-    署名待ちの契約提案（§9/§7.5: contract_id・内容・署名の方法を必ず当事者に見せる。
-    自分が署名済みかどうかも示す（#63）。
+    署名待ちの契約提案（§9/§7.5: contract_id・内容・署名の方法を必ず当事者に見せる）。
 
     visible_stateは for_player_id が当事者の提案だけを contracts_pending に
     含んでいる（engine/game.py側で絞り込み済み）。
 
-    自分が署名済みの提案には「あなたは署名済み」と書き、署名の送り方の行は
-    出さない（試走で、不成立になった行動12件のうち11件が署名済みの提案への
-    もう一度の署名だった。§11.8 #11）。未署名の当事者は今までどおり書く。
+    本人が未署名の提案と、本人は署名済みで相手を待っている提案を、見出しを
+    分けて示す（サイクル4.2d、§7.5、v0.4.4 §11.9 #3）。2回目の12席試走では、
+    不成立になった行動14件のうち8件が署名済みの提案へのもう一度の署名だった
+    （1回目は12件のうち11件。§11.8 #11で「あなたは署名済み」の注記を足した
+    だけでは収まらなかった）。署名済みの提案には署名の送り方の行を出さない。
     """
     pending = visible_state.get("contracts_pending") or []
-    lines = ["\n## 署名待ちの契約提案"]
-    if not pending:
+    unsigned_contracts = [c for c in pending if player_id not in c["signed_by"]]
+    signed_contracts = [c for c in pending if player_id in c["signed_by"]]
+
+    lines = ["\n## あなたの署名を待っている契約提案"]
+    if not unsigned_contracts:
         lines.append("  なし")
-        return lines
-    for c in pending:
-        unsigned = [p for p in c["parties"] if p not in c["signed_by"]]
-        lines.append(
-            f"  契約{c['contract_id']}（R{c['round_created']}V{c['vote_created']}提案、"
-            f"提案者: {c['proposer']}、当事者: {', '.join(c['parties'])}、"
-            f"未署名: {', '.join(unsigned) or 'なし'}）",
-        )
-        for ob in c.get("obligations", []):
-            is_mine = ob["obligor"] == player_id
-            lines.append(f"    - {_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}")
-        if player_id in c["signed_by"]:
-            lines.append("    あなたは署名済み")
-        else:
-            lines.append(
-                f'    署名するには {{"type": "contract_sign", "contract_id": "{c["contract_id"]}"}} を送る',
-            )
+    for c in unsigned_contracts:
+        lines.extend(_render_contract_pending_entry(c, player_id, config, show_sign_method=True))
+
+    lines.append("\n## あなたは署名済みで、相手の署名を待っている契約提案")
+    if not signed_contracts:
+        lines.append("  なし")
+    for c in signed_contracts:
+        lines.extend(_render_contract_pending_entry(c, player_id, config, show_sign_method=False))
+
     return lines
 
 
