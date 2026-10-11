@@ -43,7 +43,7 @@ from scripts.llm_trial import (
 from scripts.summarize_trial import (
     V0_3_RecordError, build_transcript, load_trial_records, seat_label, short_model_label,
     summarize_contracts, summarize_final, summarize_post_game_reflections,
-    summarize_roster, summarize_rounds, summarize_seats,
+    summarize_roster, summarize_rounds, summarize_seats, _print_rounds_table,
 )
 from tests.helpers import FakeAdapter
 
@@ -325,6 +325,61 @@ def test_summarize_seats_classifies_other_errors_and_reconciles_failure_counts()
     assert s["memory_chars_median"] == 1_000  # [1200, 800] の中央値
     assert s["memory_chars_max"] == 1_200
     assert s["memory_truncated_count"] == 1
+
+
+# --- 出力切れ（finish_reason、サイクル4.2c仕上げC） ---
+
+def test_summarize_seats_counts_truncated_outputs() -> None:
+    """finish_reasonが出力の上限で切れたことを表す値（length/max_tokens等）の
+    呼び出しだけがtruncated_outputsに数えられること"""
+    seat_map = {"P01": "model-x"}
+    llm_calls = [
+        {"player_id": "P01", "finish_reason": "stop"},
+        {"player_id": "P01", "finish_reason": "length"},  # OpenAI互換の言い方
+        {"player_id": "P01", "finish_reason": "max_tokens"},  # Anthropicの言い方
+        {"player_id": "P01", "finish_reason": None},
+        {"player_id": "P01", "invalid_response": True, "reason": "bad"},  # 別件、数えない
+    ]
+    seats = summarize_seats([], llm_calls, seat_map)
+    assert seats[0]["truncated_outputs"] == 2
+    assert seats[0]["calls"] == 4
+
+
+# --- 未完了のラウンド（ROUND_RESOLVED未記録、サイクル4.2c仕上げC） ---
+
+def test_summarize_rounds_marks_unresolved_round_as_not_resolved() -> None:
+    """ROUND_RESOLVEDが無いラウンドはresolved=False、あるラウンドはTrue"""
+    events = [
+        {"event_type": "ROUND_START", "round_num": 1, "data": {"carryover_in": 0, "pot": 100}},
+        {"event_type": "VOTE_REVEALED", "round_num": 1, "vote_num": 1,
+         "data": {"votes": {"P01": "YES"}}},
+        {"event_type": "ROUND_START", "round_num": 2, "data": {"carryover_in": 0, "pot": 200}},
+        {"event_type": "ROUND_RESOLVED", "round_num": 2,
+         "data": {"aborted": False, "winner_ids": ["P01"], "payout_per_winner": 100}},
+    ]
+    rounds = summarize_rounds(events)
+    by_round = {r["round_num"]: r for r in rounds}
+    assert by_round[1]["resolved"] is False
+    assert by_round[2]["resolved"] is True
+
+
+def test_print_rounds_table_shows_incomplete_for_unresolved_round(capsys) -> None:
+    """終わっていないラウンドは「未完了」と出て、「勝ち残り: （1人あたり0円）」が出ないこと"""
+    rounds = [{
+        "round_num": 2, "resolved": False, "aborted": False,
+        "winner_ids": [], "payout_per_winner": 0, "carryover_out": 0, "destroyed_pot": 0,
+        "auto_commit_ids": [], "established_contract_seqs": [],
+        "type_b_violator_ids": [], "payment_shortfall_ids": [],
+        "votes": [{
+            "vote_num": 2, "votes": {"P01": "YES", "P02": "NO"}, "result": None,
+            "eliminated_ids": [], "remaining_ids": [], "consecutive_ties_after": None,
+            "extension_fee_collected": 0,
+        }],
+    }]
+    _print_rounds_table(rounds, {})
+    out = capsys.readouterr().out
+    assert "R2 未完了" in out
+    assert "勝ち残り" not in out
 
 
 # --- max_parallel_agents=1 と >1 で結果が一致すること ---

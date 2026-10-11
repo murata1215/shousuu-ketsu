@@ -403,6 +403,7 @@ class LLMAgent(PlayerAgent):
                 system_prompt=system, user_prompt=user_message, response_text=text,
                 usage=usage, cost=cost, elapsed_ms=elapsed_ms, emotion=emotion,
                 messages_omitted=messages_omitted, prompt_over_limit=prompt_over_limit,
+                finish_reason=usage.get("finish_reason") if isinstance(usage, dict) else None,
             )
             self._notify_call_done(phase, round_num, vote_num, turn, elapsed_ms, ok=True, error_type=None)
             return text, usage

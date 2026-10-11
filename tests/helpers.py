@@ -144,11 +144,15 @@ class FakeAdapter:
 
     def __init__(
         self, texts: list[str | Exception] | None = None, default_text: str | None = None,
+        finish_reasons: list[str | None] | None = None,
     ) -> None:
         self.texts: list[str | Exception] = list(texts or [])
         self.default_text = self.DEFAULT_PASS_TEXT if default_text is None else default_text
         self.calls: list[dict] = []
         self.seat_key: str | None = None
+        # サイクル4.2c仕上げC: usage["finish_reason"]を呼び出し順に差し替えたい
+        # テスト用（既定None＝各社APIの通常終了を模したNone。未使用なら従来どおり）。
+        self.finish_reasons: list[str | None] = list(finish_reasons or [])
 
     def bind_seat(self, seat_key: str) -> None:
         self.seat_key = seat_key
@@ -163,7 +167,8 @@ class FakeAdapter:
         item = self.texts.pop(0) if self.texts else self.default_text
         if isinstance(item, Exception):
             raise item
-        usage = {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}
+        finish_reason = self.finish_reasons.pop(0) if self.finish_reasons else None
+        usage = {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20, "finish_reason": finish_reason}
         return item, usage
 
 

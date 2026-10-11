@@ -37,6 +37,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from llm.constants import is_truncated_finish_reason  # noqa: E402
 from llm.response_parser import extract_json  # noqa: E402
 
 # v0.3形式の記録を検出するための種別（v0.4には存在しない）
@@ -290,6 +291,11 @@ def summarize_rounds(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     ラウンドごとに、各投票の票の割れ方・退場者・決着/やり直し/打ち切りと、
     ラウンドの勝ち残り・受取額・打ち切りと持ち越しをまとめる（サイクル4.2b）。
+
+    `resolved`（サイクル4.2c仕上げC）はROUND_RESOLVEDイベントを見たかどうか。
+    Falseの行（記録が途中で止まっている等）は勝ち残り・打ち切りの情報が
+    まだ無い（`aborted`の既定Falseだけでは「正常に勝ち残った」と区別できず
+    誤解を招くため、この旗で未完了を明示する）。
     """
     by_round: dict[int, dict[str, Any]] = {}
     votes_by_round: dict[int, dict[int, dict[str, Any]]] = {}
@@ -297,6 +303,7 @@ def summarize_rounds(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     def _row(round_num: int) -> dict[str, Any]:
         return by_round.setdefault(round_num, {
             "round_num": round_num, "carryover_in": 0, "pot": 0,
+            "resolved": False,  # サイクル4.2c仕上げC: ROUND_RESOLVEDを見たか
             "aborted": False, "winner_ids": [], "payout_per_winner": 0,
             "carryover_out": 0, "destroyed_pot": 0,
             "auto_commit_ids": [], "established_contract_seqs": [],
@@ -340,6 +347,7 @@ def summarize_rounds(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _row(rn)["payment_shortfall_ids"].extend(data.get("player_ids", []))
         elif et == "ROUND_RESOLVED":
             row = _row(rn)
+            row["resolved"] = True
             row["aborted"] = data.get("aborted", False)
             row["winner_ids"] = data.get("winner_ids", [])
             row["payout_per_winner"] = data.get("payout_per_winner", 0)
@@ -449,14 +457,20 @@ def summarize_seats(
     """
     席ごとの最終資産・順位・借入額・呼び出し回数・無効な応答・時間切れ・
     拒否(429)・その他の失敗・自動代行・予算停止・所要時間・費用・送った
-    文面の字数・上限で省いた発言数・メモの字数をまとめる（サイクル4.2bで
-    最終資産・順位・借入額を追加。サイクル4.2cでその他の失敗・文面・
-    省略件数・メモの統計を追加）。
+    文面の字数・上限で省いた発言数・メモの字数・出力切れの件数をまとめる
+    （サイクル4.2bで最終資産・順位・借入額を追加。サイクル4.2cでその他の
+    失敗・文面・省略件数・メモの統計・出力切れを追加）。
 
     「その他の失敗」（other_errors）は、時間切れ・拒否429のどちらでもない
     失敗（HTTP 400等、llm/adapters.py::_classify_errorの"server_error"・
     "connection_error"・"other"）。試走でこの列が無く、どこにも表示されない
     失敗が1件あった不備の修正。
+
+    「出力切れ」（truncated_outputs）は、`finish_reason`が出力の上限で
+    切れたことを表す値（`llm.constants.is_truncated_finish_reason`、
+    一覧は`TRUNCATED_FINISH_REASONS`1か所）だった呼び出しの件数
+    （サイクル4.2c仕上げC: Sonnet 5直結席で考える分が出力上限を
+    使い切り本文が空になる事故の検知用）。
     """
     auto_commit_counts: dict[str, int] = {}
     budget_blocked_counts: dict[str, int] = {}
@@ -479,6 +493,7 @@ def summarize_seats(
             "player_id": pid, "model_id": model_id, "loan": loans.get(pid),
             "final_assets": final_assets.get(pid), "final_rank": final_ranks.get(pid),
             "calls": 0, "invalid_responses": 0, "timeouts": 0, "rate_limited": 0, "other_errors": 0,
+            "truncated_outputs": 0,
             "auto_commits": auto_commit_counts.get(pid, 0),
             "budget_blocked": budget_blocked_counts.get(pid, 0),
             "elapsed_ms_total": 0.0, "cost_usd_total": 0.0,
@@ -505,6 +520,8 @@ def summarize_seats(
         row["elapsed_ms_total"] += entry.get("elapsed_ms") or 0.0
         row["cost_usd_total"] += entry.get("cost_usd") or 0.0
         row["messages_omitted_total"] += entry.get("messages_omitted") or 0
+        if is_truncated_finish_reason(entry.get("finish_reason")):
+            row["truncated_outputs"] += 1
         user_prompt = entry.get("user_prompt")
         if user_prompt is not None:
             row["_user_prompt_chars"].append(len(user_prompt))
@@ -616,7 +633,13 @@ def _print_rounds_table(rounds: list[dict[str, Any]], contracts: dict[str, Any])
             elif v["result"] in ("retry", "abort"):
                 line += f" → 延長料{v['extension_fee_collected']:,}円（連続{v['consecutive_ties_after']}回）"
             print(line)
-        if r["aborted"]:
+        if not r["resolved"]:
+            # サイクル4.2c仕上げC: ROUND_RESOLVEDが未記録（試合が途中で止まっている）
+            # ラウンドは、勝ち残りを出さず「未完了」と書く
+            # （従来は`aborted`の既定Falseのせいで「勝ち残り: （1人あたり0円）」と
+            # 誤って出ていた不備の修正）
+            print(f"  → R{r['round_num']} 未完了（ROUND_RESOLVEDが未記録）")
+        elif r["aborted"]:
             if r["destroyed_pot"]:
                 print(f"  → R{r['round_num']} 打ち切り。山{r['destroyed_pot']:,}円は消滅")
             else:
@@ -675,7 +698,7 @@ def _print_seats(seats: list[dict[str, Any]]) -> None:
     print("\n--- 席ごとの呼び出し統計 ---")
     print(
         f"{'席':<6}{'モデルID':<34}{'最終資産':>13}{'順位':>5}{'借入額':>12}{'呼出':>5}{'無効':>5}"
-        f"{'時間切れ':>7}{'拒否429':>7}{'その他':>7}{'自動代行':>7}{'予算停止':>7}"
+        f"{'時間切れ':>7}{'拒否429':>7}{'その他':>7}{'出力切れ':>7}{'自動代行':>7}{'予算停止':>7}"
         f"{'所要時間':>10}{'費用($)':>9}",
     )
     for s in seats:
@@ -685,7 +708,7 @@ def _print_seats(seats: list[dict[str, Any]]) -> None:
         print(
             f"{s['player_id']:<6}{(s['model_id'] or ''):<34}{assets:>13}{rank:>5}{loan:>12}"
             f"{s['calls']:>5}{s['invalid_responses']:>5}"
-            f"{s['timeouts']:>7}{s['rate_limited']:>7}{s['other_errors']:>7}"
+            f"{s['timeouts']:>7}{s['rate_limited']:>7}{s['other_errors']:>7}{s['truncated_outputs']:>7}"
             f"{s['auto_commits']:>7}{s['budget_blocked']:>7}"
             f"{s['elapsed_ms_total']:>8.0f}ms{s['cost_usd_total']:>9.4f}",
         )

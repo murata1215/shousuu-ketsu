@@ -34,8 +34,11 @@ def _vote_text(vote="YES"):
     return json.dumps({"strategy": {"reason": "r", "emotion": "楽"}, "action": {"type": "vote_commit", "vote": vote}})
 
 
-def _make_agent(player_id="P01", texts=None, model_key="H1", game_cost_budget=None, tmp_path=None, config=None):
-    adapter = FakeAdapter(texts=texts)
+def _make_agent(
+    player_id="P01", texts=None, model_key="H1", game_cost_budget=None, tmp_path=None, config=None,
+    finish_reasons=None,
+):
+    adapter = FakeAdapter(texts=texts, finish_reasons=finish_reasons)
     logger = LLMLogger(output_dir=tmp_path or "/tmp/shousuu_ketsu_test_logs", game_id="test")
     agent = LLMAgent(
         player_id, get_model(model_key), adapter, logger, config or GameConfig.default_12(),
@@ -95,6 +98,19 @@ def test_choose_loan_falls_back_on_adapter_error(tmp_path):
     agent, _, _ = _make_agent(texts=[RuntimeError("boom")], tmp_path=tmp_path)
     config = GameConfig.default_12()
     assert agent.choose_loan(config) == config.loan_min
+
+
+# --- finish_reasonの記録への伝播（サイクル4.2c仕上げC） ---
+
+def test_call_passes_finish_reason_from_usage_to_log_call(tmp_path):
+    """アダプタのusage["finish_reason"]が*_llm_calls.jsonl相当の記録に残ること
+    （164件すべてNoneだった不備の修正。アダプタ3経路とも既にusageへ
+    finish_reasonを入れているので、llm_agent.py側でlog_call()へ渡すだけでよい）"""
+    agent, _, logger = _make_agent(
+        texts=[_pass_text()], finish_reasons=["max_tokens"], tmp_path=tmp_path,
+    )
+    agent.negotiate(_dummy_player_state(), 1, 1, 1, _dummy_visible_state())
+    assert logger.entries[-1]["finish_reason"] == "max_tokens"
 
 
 # --- negotiate（vote_num入りI/F） ---
