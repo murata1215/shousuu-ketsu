@@ -38,6 +38,33 @@ class ParseError(Exception):
         self.correction_hint = correction_hint
 
 
+def _loads_json(candidate: str) -> dict[str, Any] | None:
+    """
+    json.loads()を1か所に集約する（サイクル4.2c仕上げA）。
+
+    まず厳密な読み取りを試す（今まで読めていた応答の意味は変える意図がない）。
+    `Invalid control character`（文字列中に生の改行・タブ等が入った応答、
+    メモが1,000字・複数行になり増えてきた形）で失敗した場合だけ、
+    `strict=False`（制御文字を許す）で1回だけやり直す。それでも
+    `JSONDecodeError`ならNoneを返す（他の壊れ方は従来どおり呼び出し元の
+    多段フォールバックに委ねる）。
+
+    extract_json()内の4つの取り出し方（コードブロック・閉じていない
+    コードブロック・生JSON・文中の最初の{…}）全てがこの関数を経由する
+    （CLAUDE.md過去の落とし穴④: 同型の関数の一部だけ直す事故を避けるため）。
+    """
+    try:
+        result = json.loads(candidate)
+        return result if isinstance(result, dict) else None
+    except json.JSONDecodeError:
+        pass
+    try:
+        result = json.loads(candidate, strict=False)
+        return result if isinstance(result, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
 def extract_json(text: str, _repaired: bool = False) -> dict[str, Any] | None:
     """
     レスポンスからJSONオブジェクトを抽出する（dangou-card/gentei-jankenから移植、ゲーム非依存）
@@ -52,10 +79,9 @@ def extract_json(text: str, _repaired: bool = False) -> dict[str, Any] | None:
     """
     m = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
     if m:
-        try:
-            return json.loads(m.group(1).strip())
-        except json.JSONDecodeError:
-            pass
+        result = _loads_json(m.group(1).strip())
+        if result is not None:
+            return result
 
     m = re.search(r'```(?:json)?\s*\n?(.+)', text, re.DOTALL)
     if m:
@@ -70,17 +96,15 @@ def extract_json(text: str, _repaired: bool = False) -> dict[str, Any] | None:
                 if depth == 0:
                     last_close = i
         if last_close >= 0:
-            try:
-                return json.loads(candidate[: last_close + 1])
-            except json.JSONDecodeError:
-                pass
+            result = _loads_json(candidate[: last_close + 1])
+            if result is not None:
+                return result
 
     stripped = text.strip()
     if stripped.startswith("{"):
-        try:
-            return json.loads(stripped)
-        except json.JSONDecodeError:
-            pass
+        result = _loads_json(stripped)
+        if result is not None:
+            return result
 
     start = text.find("{")
     if start >= 0:
@@ -91,10 +115,10 @@ def extract_json(text: str, _repaired: bool = False) -> dict[str, Any] | None:
             elif text[i] == "}":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        return json.loads(text[start : i + 1])
-                    except json.JSONDecodeError:
+                    result = _loads_json(text[start : i + 1])
+                    if result is None:
                         break
+                    return result
 
     if not _repaired:
         repaired = _repair_trailing_garbage(text)
@@ -485,9 +509,20 @@ _COMMENT_FIELD_OPEN_RE = re.compile(r'"comment"\s*:\s*"(.*)', re.DOTALL)
 
 
 def _salvage_string(fragment: str) -> str:
-    """壊れたJSON文字列断片からベストエフォートでテキストを復元する"""
+    """
+    壊れたJSON文字列断片からベストエフォートでテキストを復元する
+
+    サイクル4.2c仕上げA: 断片に生の改行・タブ等が入っている場合（厳密な
+    読み取りでは`Invalid control character`になる）、`strict=False`で
+    1回だけやり直す。それでも失敗する壊れ方（引用符の対応がおかしい等）は
+    従来どおり手製の置換にフォールバックする。
+    """
     try:
         return json.loads(f'"{fragment}"')
+    except json.JSONDecodeError:
+        pass
+    try:
+        return json.loads(f'"{fragment}"', strict=False)
     except json.JSONDecodeError:
         return (
             fragment.replace('\\"', '"').replace("\\n", "\n")

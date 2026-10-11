@@ -53,6 +53,12 @@ logger = logging.getLogger(__name__)
 # （gentei-janken由来。CLAUDE.md過去の落とし穴④: 同型関数は全数検査）。
 _JSON_OBJECT_RESPONSE_FORMAT_ADAPTER_TYPES = {"openai_compat", "gemini"}
 
+# サイクル4.2c仕上げB: 振り返り（reflect）でmemoryが読み取れなかった場合の
+# 聞き直し回数。negotiate()のMAX_RETRIES（=2）より少なく、1回だけに絞る
+# （費用と時間のため）。通信の失敗（_call()が(None, None)を返す場合）は
+# この聞き直しの対象外（今までどおり聞き直さない）。
+_REFLECT_MAX_RETRIES = 1
+
 
 def build_json_object_request_options(
     model_info: ModelInfo, system: str, user_message: str, *, player_id: str = "?", phase: str = "?",
@@ -240,31 +246,69 @@ class LLMAgent(PlayerAgent):
         *, is_round_end: bool,
     ) -> None:
         """
-        投票終了後の振り返り（引き継ぎメモ、§9.4、v0.4.3）。失敗時はメモを更新しない
+        投票終了後の振り返り（引き継ぎメモ、§9.4、v0.4.3）。
 
         v0.4.3で「ラウンドの終わりと試合後」から「投票が終わるたびと試合後」に
         変わった。メモを書き換えられるのはこのメソッドだけ（negotiate/commitの
         応答のmemoryは読まない、#66）。
+
+        サイクル4.2c仕上げB: 応答そのものがJSONとして読めない場合（例: 生の
+        改行で丸ごと壊れている等。`extract_json()`がNoneを返す場合）、
+        交渉・投票と同じ「無効な応答」の注記（`log_invalid_response`）を記録し、
+        是正の文をつけて`_REFLECT_MAX_RETRIES`（=1）回だけ聞き直す。それでも
+        読み取れなければ前のメモを残す（従来どおり）。通信の失敗（`_call()`が
+        `(None, None)`を返す場合）は聞き直さず、その場で戻る。
+
+        JSONとしては読めたがmemoryフィールドが無い／空（§9.4: 本人が今回は
+        書き換えないことを選んだ合図、`llm/response_parser.py::extract_memory`
+        のdocstring参照）は無効な応答として扱わない——聞き直さず、メモも
+        更新せずそのまま戻る（従来どおり）。
         """
         turn_prompt = build_reflection_prompt(
             player_state, round_num, vote_num, visible_state, self.config,
             is_round_end=is_round_end, memory=self._memory or None,
         )
-        text, _usage = self._call(
-            self._system_prompt, turn_prompt.text, max_tokens=DEFAULT_MAX_TOKENS, phase="reflect",
-            round_num=round_num, vote_num=vote_num,
-            messages_omitted=turn_prompt.omitted_messages,
-        )
-        if text is None:
-            return
-        new_memory = extract_memory(text)
-        if new_memory is not None:
-            self._memory = new_memory.text
-            self.llm_logger.log_memory_written(
-                player_id=self.player_id, model_id=self.model_info.model_id,
+        base_prompt = turn_prompt.text
+        prompt = base_prompt
+
+        for _attempt in range(_REFLECT_MAX_RETRIES + 1):
+            text, _usage = self._call(
+                self._system_prompt, prompt, max_tokens=DEFAULT_MAX_TOKENS, phase="reflect",
                 round_num=round_num, vote_num=vote_num,
-                memory_chars=new_memory.raw_chars, memory_truncated=new_memory.truncated,
+                messages_omitted=turn_prompt.omitted_messages,
             )
+            if text is None:
+                return
+
+            data = extract_json(text)
+            if data is None:
+                parse_error = ParseError(
+                    "memoryが読み取れません",
+                    '回答はJSON形式で {"memory": "..."} の1項目だけ返してください。',
+                )
+                logger.warning(
+                    "parse error for %s reflect round=%d vote=%d: %s",
+                    player_state.player_id, round_num, vote_num, parse_error,
+                )
+                self.llm_logger.log_invalid_response(
+                    player_id=self.player_id, model_id=self.model_info.model_id,
+                    phase="reflect", round_num=round_num, vote_num=vote_num, turn=None,
+                    reason=str(parse_error),
+                )
+                prompt = base_prompt + "\n\n" + make_correction_message(parse_error)
+                continue
+
+            new_memory = extract_memory(text)
+            if new_memory is not None:
+                self._memory = new_memory.text
+                self.llm_logger.log_memory_written(
+                    player_id=self.player_id, model_id=self.model_info.model_id,
+                    round_num=round_num, vote_num=vote_num,
+                    memory_chars=new_memory.raw_chars, memory_truncated=new_memory.truncated,
+                )
+            return  # memory無し/空は本人の意思として扱う。聞き直さずそのまま戻る
+
+        # _REFLECT_MAX_RETRIES回聞き直してもJSONが読めなかった場合、前のメモを残す
 
     def post_game_reflect(self, post_game_context: dict[str, Any]) -> dict[str, Any] | None:
         """試合完全終了後の振り返り（§9.4）。ゲーム完全終了後に全プレイヤーへ1回だけ呼ばれる"""

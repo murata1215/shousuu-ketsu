@@ -193,6 +193,46 @@ def test_reflect_keeps_old_memory_on_failure(tmp_path):
     assert agent._memory == "以前のメモ"
 
 
+# --- reflectの聞き直し（サイクル4.2c仕上げB） ---
+
+def test_reflect_retries_once_and_updates_memory_on_second_valid_response(tmp_path):
+    """1回目が読み取れない応答、2回目が正しい応答のとき、メモが2回目の内容に
+    更新され、無効の注記が1件残ること"""
+    agent, adapter, logger = _make_agent(
+        texts=["壊れています", json.dumps({"memory": "2回目で読めた"})], tmp_path=tmp_path,
+    )
+    agent._memory = "以前のメモ"
+    agent.reflect(_dummy_player_state(), 1, 2, _dummy_visible_state(), is_round_end=False)
+    assert agent._memory == "2回目で読めた"
+    assert len(adapter.calls) == 2
+    invalid_entries = [e for e in logger.entries if e.get("invalid_response")]
+    assert len(invalid_entries) == 1
+    assert invalid_entries[0]["phase"] == "reflect"
+
+
+def test_reflect_keeps_old_memory_when_both_attempts_unreadable(tmp_path):
+    """2回とも読み取れないとき、前のメモが残ること。聞き直しは1回までなので
+    呼び出しは合計2回で止まる"""
+    agent, adapter, logger = _make_agent(
+        texts=["壊れています1回目", "壊れています2回目"], tmp_path=tmp_path,
+    )
+    agent._memory = "以前のメモ"
+    agent.reflect(_dummy_player_state(), 1, 2, _dummy_visible_state(), is_round_end=False)
+    assert agent._memory == "以前のメモ"
+    assert len(adapter.calls) == 2
+    invalid_entries = [e for e in logger.entries if e.get("invalid_response")]
+    assert len(invalid_entries) == 2
+
+
+def test_reflect_does_not_retry_on_communication_failure(tmp_path):
+    """通信の失敗（アダプタ例外）は聞き直さず、その場で戻る"""
+    agent, adapter, _ = _make_agent(texts=[RuntimeError("timeout")], tmp_path=tmp_path)
+    agent._memory = "以前のメモ"
+    agent.reflect(_dummy_player_state(), 1, 2, _dummy_visible_state(), is_round_end=False)
+    assert agent._memory == "以前のメモ"
+    assert len(adapter.calls) == 1
+
+
 def test_reflect_logs_vote_num(tmp_path):
     """#55・#56: 振り返りの呼び出しの記録にvote_numが入る（v0.4.3でラウンド単位
     からNoneだったのを、投票ごとの振り返りに合わせて実際のvote_numへ変えた）"""

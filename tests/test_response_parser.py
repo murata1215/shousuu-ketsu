@@ -319,6 +319,53 @@ def test_extract_json_returns_none_for_garbage():
     assert extract_json("completely not json at all") is None
 
 
+# --- サイクル4.2c仕上げA: 生の改行入りJSON（厳密な読み取りでは失敗する） ---
+
+def test_extract_memory_from_fenced_code_block_with_raw_newlines():
+    """
+    メモの本文に生の改行が2つ以上入ったコードブロックから読み取れること
+    （Haiku席の振り返りで実際に起きた壊れ方: 厳密なjson.loadsは
+    `Invalid control character`で失敗していた）
+    """
+    text = (
+        '```json\n'
+        '{"memory": "【R2V1結果】YESで多数派、損失なし。\n'
+        '【次への心構え】次も多数派狙いで慎重にいく。\n'
+        '契約の条件は守る。"}\n'
+        '```'
+    )
+    result = extract_memory(text)
+    assert result is not None
+    assert "【次への心構え】" in result.text
+    assert result.text.count("\n") == 2
+
+
+def test_extract_json_from_unfenced_raw_json_with_raw_newlines():
+    """コードブロックに入っていない生JSONでも、生の改行があれば読めること"""
+    text = '{"memory": "1行目。\n2行目。\n3行目。"}'
+    data = extract_json(text)
+    assert data is not None
+    assert data["memory"] == "1行目。\n2行目。\n3行目。"
+
+
+def test_extract_json_from_unclosed_code_block_with_raw_newlines():
+    """閉じフェンスなし（打ち切られた応答）＋生の改行の組み合わせでも読めること"""
+    text = '```json\n{"memory": "途中で切れた。\nここまでは読める。"}'
+    data = extract_json(text)
+    assert data is not None
+    assert data["memory"] == "途中で切れた。\nここまでは読める。"
+
+
+def test_parse_response_message_with_raw_newlines_in_negotiation():
+    """交渉のbroadcast.messageに生の改行が入っていても読めること"""
+    text = (
+        '{"strategy": {"reason": "r", "emotion": "楽"}, '
+        '"action": {"type": "broadcast", "message": "1行目\n2行目"}}'
+    )
+    _, action = parse_response(text, "P01", "negotiation")
+    assert action.message == "1行目\n2行目"
+
+
 def test_extract_memory_returns_none_for_missing_field():
     assert extract_memory('{"type": "pass"}') is None
 
