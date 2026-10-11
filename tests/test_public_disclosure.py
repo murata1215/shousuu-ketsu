@@ -12,8 +12,9 @@ from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.game import Game
 from engine.models import (
-    BroadcastAction, ContractProposeAction, DmAction, TransferAction, Vote,
+    BroadcastAction, ContractProposeAction, DmAction, PlayerState, TransferAction, Vote,
 )
+from llm.prompt_builder import build_negotiation_prompt
 from llm.reasons import reject_reason_ja
 from tests.helpers import (
     FailingCommitAgent, ScriptedAgent, VisibleStateRecordingAgent, make_roster,
@@ -261,13 +262,15 @@ def test_last_action_error_clears_on_next_action_even_if_it_is_a_pass() -> None:
     assert by_turn[(1, 1, 3)]["my_last_action_error"] is None  # turn2でpassした後は消える
 
 
-def test_acceptance_55_round_conversation_carries_across_votes() -> None:
+def test_acceptance_55_vote_conversation_and_memo_carry_per_vote() -> None:
     """
-    #55: R1V2の交渉中 → R1V1の交渉での全体発言と、自分が当事者のDMが、
-    投票番号と巡がわかる形で本人に渡っている。他人どうしのDMは入っていない
+    #55（v0.4.3で書き直し）: R1V2の交渉中 → 本人に渡る文面には、R1V2の交渉での
+    全体発言と、自分が当事者のDMだけが、巡がわかる形で入っている。他人どうしの
+    DMは入っていない。R1V1の会話は入っておらず、R1V1の振り返りで本人が書いた
+    メモが入っている
 
-    （v0.4.2 §11.7 #1。サイクル4.1まではエンジンが投票ごとに会話を消しており、
-    V1の会話がV2の本人に渡っていなかった）
+    （v0.4.3 §11.8 #15。会話の引き継ぎを、ラウンドごとから投票ごとに変えた。
+    サイクル4.2のラウンド単位は廃止）
     """
     votes_by_vote = {
         (1, 1): {f"P{i:02d}": Vote.YES for i in range(1, 8)}
@@ -275,13 +278,19 @@ def test_acceptance_55_round_conversation_carries_across_votes() -> None:
     }
     agents = make_roster(votes_by_vote, num_players=12)
     agents["P07"].negotiate_actions[(1, 1, 1)] = BroadcastAction(
-        player_id="P07", message="全員YESで合わせよう",
+        player_id="P07", message="V1の全体発言",
     )
     agents["P04"].negotiate_actions[(1, 1, 1)] = DmAction(
-        player_id="P04", to="P07", message="乗る",
+        player_id="P04", to="P07", message="V1のDM",
     )
     agents["P09"].negotiate_actions[(1, 1, 1)] = DmAction(
         player_id="P09", to="P10", message="他人には見えないはずの内緒話",
+    )
+    agents["P08"].negotiate_actions[(1, 2, 1)] = BroadcastAction(
+        player_id="P08", message="V2の全体発言",
+    )
+    agents["P04"].negotiate_actions[(1, 2, 1)] = DmAction(
+        player_id="P04", to="P07", message="V2のDM",
     )
 
     recorder = VisibleStateRecordingAgent(agents["P04"])
@@ -292,27 +301,57 @@ def test_acceptance_55_round_conversation_carries_across_votes() -> None:
     game.run()
 
     by_turn = _negotiate_snapshots_by_key(recorder)
-    v2_messages = by_turn[(1, 2, 1)]["messages"]
+    # turn=1ではP04自身が送るV2のDMはまだ_vote_messagesに無い（P04の手番の最中に
+    # 自分の行動が記録されるのはこの手番の後）。turn=1が完了した後のturn=2の
+    # 時点でturn=1の全メッセージが見えていることを確かめる（早期終了前に全員が
+    # もう1巡呼ばれるのは、P04自身がturn=2もPassActionで応答するため）。
+    v2_messages = by_turn[(1, 2, 2)]["messages"]
 
+    # V2の会話だけが入っている。V1の会話（全体発言・DM）は入っていない
     broadcasts = [m for m in v2_messages if m["type"] == "broadcast"]
     assert len(broadcasts) == 1
-    assert broadcasts[0]["from"] == "P07"
-    assert broadcasts[0]["vote_num"] == 1
-    assert broadcasts[0]["turn"] == 1
+    assert broadcasts[0]["from"] == "P08"
+    assert broadcasts[0]["message"] == "V2の全体発言"
+    assert broadcasts[0]["vote_num"] == 2
 
     dms = [m for m in v2_messages if m["type"] == "dm"]
     assert len(dms) == 1  # P04が当事者のDMだけ。P09→P10は入らない
     assert dms[0]["from"] == "P04" and dms[0]["to"] == "P07"
-    assert dms[0]["vote_num"] == 1 and dms[0]["turn"] == 1
+    assert dms[0]["message"] == "V2のDM"
+    assert dms[0]["vote_num"] == 2
+
+    all_messages_in_v2 = {m["message"] for m in v2_messages}
+    assert "V1の全体発言" not in all_messages_in_v2
+    assert "V1のDM" not in all_messages_in_v2
+
+    # R1V1の振り返りが正しいタイミング（決着後・ラウンド継続）で呼ばれている
+    assert len(recorder.reflect_snapshots) >= 1
+    r1v1_round_num, r1v1_vote_num, r1v1_is_round_end, _r1v1_state = recorder.reflect_snapshots[0]
+    assert (r1v1_round_num, r1v1_vote_num, r1v1_is_round_end) == (1, 1, False)
+
+    # R1V1の振り返りで本人が書いたメモは、R1V2の文面にそのまま入り、V1の会話は
+    # 入らない（文面はprompt_builder.pyが組み立てる。visible_stateにmemoryの
+    # キーは無く、エージェント側（LLMAgent._memory）が持つ値をmemory=で渡す）
+    text_with_memo = build_negotiation_prompt(
+        PlayerState(player_id="P04", cash=0, initial_loan=0), 1, 2, 2,
+        by_turn[(1, 2, 2)], GameConfig.dev_small(num_players=12, num_rounds=1),
+        memory="R1V1で書いたメモ",
+    )
+    assert "R1V1で書いたメモ" in text_with_memo
+    assert "V1の全体発言" not in text_with_memo
+    assert "V1のDM" not in text_with_memo
+    assert "V2の全体発言" in text_with_memo
 
 
-def test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty() -> None:
+def test_acceptance_56_reflection_runs_after_every_vote() -> None:
     """
-    #56: R1の終わりの振り返り。R2V1の交渉中 → 振り返りには、R1の全部の投票
-    の会話が渡っている。R2V1では、R1の会話は渡っていない
+    #56（v0.4.3で書き直し）: R1V1が決着してV2へ続くとき。R1の最後の投票の後 →
+    どちらでも、退場者を含む12人全員に振り返りを求めている。振り返りに渡る
+    会話は、その投票の分だけである。R1の最後の投票の振り返りは、山の支払いと
+    利息の計上の後に行われ、ラウンドの結果が渡っている。R2V1の文面には、
+    R1の会話は入っていない
 
-    （v0.4.2 §11.7 #1。ラウンドの終わりの振り返りには最後の投票の会話しか
-    渡っていなかった不具合の再発防止）
+    （v0.4.3 §11.8 #15。振り返りを投票が終わるたびに行うよう変えた）
     """
     votes_by_vote = {
         (1, 1): {f"P{i:02d}": Vote.YES for i in range(1, 8)}
@@ -337,13 +376,28 @@ def test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty()
     game = Game(config=config, agents=agents, seed=56, logger=EventLogger(), stop_after_round=2)
     game.run()
 
-    r1_round_num, r1_reflect_state = recorder.reflect_snapshots[0]
-    assert r1_round_num == 1
-    r1_broadcasts = {
+    # R1V1決着後（ラウンド継続）とR1V2（ラウンドの最後）の両方で振り返りが呼ばれ、
+    # 退場者を含む12人全員に求められている（全プレイヤーがrecorderでなくても、
+    # engine側のsorted(self.agents)呼び出しは全員分発火している前提なので、
+    # ここではrecorderを付けたP08自身の呼び出し回数と内容を確認する）。
+    assert len(recorder.reflect_snapshots) >= 2
+    r1v1_round, r1v1_vote, r1v1_end, r1v1_state = recorder.reflect_snapshots[0]
+    assert (r1v1_round, r1v1_vote, r1v1_end) == (1, 1, False)
+    r1v1_messages = {
         (m["vote_num"], m["turn"], m["message"])
-        for m in r1_reflect_state["messages"] if m["type"] == "broadcast"
+        for m in r1v1_state["messages"] if m["type"] == "broadcast"
     }
-    assert r1_broadcasts == {(1, 1, "V1の発言"), (2, 1, "V2の発言")}
+    assert r1v1_messages == {(1, 1, "V1の発言")}  # V1の会話だけ（V2はまだ起きていない）
+
+    r1v2_round, r1v2_vote, r1v2_end, r1v2_state = recorder.reflect_snapshots[1]
+    assert (r1v2_round, r1v2_vote, r1v2_end) == (1, 2, True)  # ラウンドの最後の投票
+    r1v2_messages = {
+        (m["vote_num"], m["turn"], m["message"])
+        for m in r1v2_state["messages"] if m["type"] == "broadcast"
+    }
+    assert r1v2_messages == {(2, 1, "V2の発言")}  # V2の会話だけ（V1は渡らない）
+    # ラウンドの結果（勝ち残りと受け取った額）が渡っている
+    assert r1v2_state["round_results"], "ラウンドの最後の振り返りにラウンドの結果が渡っていない"
 
     by_turn = _negotiate_snapshots_by_key(recorder)
     assert by_turn[(2, 1, 1)]["messages"] == []  # R2に入ったらR1の会話は渡らない

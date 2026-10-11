@@ -99,7 +99,7 @@ class _Recorder(PlayerAgent):
         self.player_id = inner.player_id
         self.negotiate_snapshots: dict[tuple[int, int, int], dict[str, Any]] = {}
         self.commit_snapshots: dict[tuple[int, int], dict[str, Any]] = {}
-        self.reflect_snapshots: dict[int, dict[str, Any]] = {}
+        self.reflect_snapshots: dict[tuple[int, int], dict[str, Any]] = {}
 
     def choose_loan(self, config: GameConfig) -> int:
         return self.inner.choose_loan(config)
@@ -112,9 +112,11 @@ class _Recorder(PlayerAgent):
         self.commit_snapshots[(round_num, vote_num)] = copy.deepcopy(visible_state)
         return self.inner.commit(player_state, round_num, vote_num, visible_state)
 
-    def reflect(self, player_state, round_num, visible_state) -> None:
-        self.reflect_snapshots[round_num] = copy.deepcopy(visible_state)
-        return self.inner.reflect(player_state, round_num, visible_state)
+    def reflect(self, player_state, round_num, vote_num, visible_state, *, is_round_end) -> None:
+        self.reflect_snapshots[(round_num, vote_num)] = copy.deepcopy(visible_state)
+        return self.inner.reflect(
+            player_state, round_num, vote_num, visible_state, is_round_end=is_round_end,
+        )
 
 
 def _player(pid: str) -> PlayerState:

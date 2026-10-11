@@ -98,9 +98,9 @@ class VisibleStateRecordingAgent(PlayerAgent):
         self.inner = inner
         self.negotiate_snapshots: list[tuple[int, int, int, dict[str, Any]]] = []
         self.commit_snapshots: list[tuple[int, int, dict[str, Any]]] = []
-        self.reflect_snapshots: list[tuple[int, dict[str, Any]]] = []
-        """(round_num, visible_state) のコピー（サイクル4.2: 受け入れ#56用。
-        ラウンド終了後の振り返りに渡るvisible_stateを確かめる）"""
+        self.reflect_snapshots: list[tuple[int, int, bool, dict[str, Any]]] = []
+        """(round_num, vote_num, is_round_end, visible_state) のコピー（サイクル4.2c:
+        受け入れ#56用。投票が終わるたびの振り返りに渡るvisible_stateを確かめる）"""
 
     def choose_loan(self, config: GameConfig) -> int:
         return self.inner.choose_loan(config)
@@ -115,9 +115,12 @@ class VisibleStateRecordingAgent(PlayerAgent):
         self.commit_snapshots.append((round_num, vote_num, copy.deepcopy(visible_state)))
         return self.inner.commit(player_state, round_num, vote_num, visible_state)
 
-    def reflect(self, player_state: PlayerState, round_num: int, visible_state: dict) -> None:
-        self.reflect_snapshots.append((round_num, copy.deepcopy(visible_state)))
-        return self.inner.reflect(player_state, round_num, visible_state)
+    def reflect(
+        self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict,
+        *, is_round_end: bool,
+    ) -> None:
+        self.reflect_snapshots.append((round_num, vote_num, is_round_end, copy.deepcopy(visible_state)))
+        return self.inner.reflect(player_state, round_num, vote_num, visible_state, is_round_end=is_round_end)
 
     def post_game_reflect(self, post_game_context: dict[str, Any]) -> dict[str, Any] | None:
         return self.inner.post_game_reflect(post_game_context)

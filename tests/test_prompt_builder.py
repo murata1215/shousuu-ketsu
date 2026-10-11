@@ -98,7 +98,7 @@ def _build_fixture_game(seed: int = 1):
         for pid, rec in recorders.items()
     }
     reflect_snapshots = {
-        pid: {r: vs for r, vs in rec.reflect_snapshots}
+        pid: {(r, v): vs for r, v, _is_round_end, vs in rec.reflect_snapshots}
         for pid, rec in recorders.items()
     }
     return game, config, result, snapshots, reflect_snapshots
@@ -201,7 +201,9 @@ def test_all_json_requesting_prompts_contain_json_word(fixture_game):
     prompts = {
         "negotiation": build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config),
         "commit": build_commit_prompt(_ps("P01"), 1, 1, vs, config),
-        "reflection": build_reflection_prompt(_ps("P01"), 1, reflect_snapshots["P01"][1], config),
+        "reflection": build_reflection_prompt(
+            _ps("P01"), 1, 2, reflect_snapshots["P01"][(1, 2)], config, is_round_end=True,
+        ),
         "post_game": build_post_game_reflection_prompt(config, post_ctx),
     }
     for name, text in prompts.items():
@@ -236,10 +238,22 @@ def test_commit_heading_shows_round_and_vote(fixture_game):
     assert text.splitlines()[0] == "=== R1V1 / 投票（Commit） ==="
 
 
-def test_reflection_heading_shows_round_only(fixture_game):
+def test_reflection_heading_shows_round_and_vote(fixture_game):
+    """v0.4.3: 振り返りは投票ごとに行うため、見出しに投票番号も入る（例: R1V2）"""
     _game, config, _result, _s, reflect_snapshots = fixture_game
-    text = build_reflection_prompt(_ps("P01"), 1, reflect_snapshots["P01"][1], config)
-    assert text.splitlines()[0] == "=== R1 / 振り返り（引き継ぎメモ） ==="
+    text = build_reflection_prompt(
+        _ps("P01"), 1, 2, reflect_snapshots["P01"][(1, 2)], config, is_round_end=True,
+    )
+    assert text.splitlines()[0] == "=== R1V2 / 振り返り（引き継ぎメモ） ==="
+
+
+def test_reflection_mid_round_heading_shows_vote_num(fixture_game):
+    """R1V1決着後、ラウンドが続く場合の振り返りは =R1V1= で、is_round_end=Falseになる"""
+    _game, config, _result, _s, reflect_snapshots = fixture_game
+    text = build_reflection_prompt(
+        _ps("P01"), 1, 1, reflect_snapshots["P01"][(1, 1)], config, is_round_end=False,
+    )
+    assert text.splitlines()[0] == "=== R1V1 / 振り返り（引き継ぎメモ） ==="
 
 
 # --- 退場中の表示（承認済み決定6） ---

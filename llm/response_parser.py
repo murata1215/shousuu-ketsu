@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import ValidationError
 
@@ -120,12 +120,28 @@ def normalize_emotion(strategy: dict[str, Any]) -> dict[str, Any]:
     return strategy
 
 
-def extract_memory(text: str) -> str | None:
-    """
-    LLM応答から次ラウンドへ引き継ぐメモ（memoryフィールド、§9.4）を取り出す
+class MemoryResult(NamedTuple):
+    """extract_memory()の戻り値（サイクル4.2c）。切り捨ての有無を呼び出し元の記録に残すため"""
 
-    他プレイヤーの可視状態・イベント・プロンプトには渡らない。本人の次ラウンドの
-    プロンプトにのみ再注入される（llm/llm_agent.py::LLMAgent._memory）。
+    text: str
+    """切り捨て後のメモ本文（MEMORY_MAX_LENGTH文字以内）"""
+
+    raw_chars: int
+    """切り捨て前の文字数"""
+
+    truncated: bool
+    """raw_chars > MEMORY_MAX_LENGTH だったか"""
+
+
+def extract_memory(text: str) -> MemoryResult | None:
+    """
+    LLM応答から次の投票（ラウンドの最後の投票なら次のラウンド）へ引き継ぐ
+    メモ（memoryフィールド、§9.4）を取り出す
+
+    v0.4.3でメモを書き換えられるのは振り返りのときだけになった
+    （llm/llm_agent.py::LLMAgent.negotiate()/commit()はこれを呼ばない）。
+    他プレイヤーの可視状態・イベント・プロンプトには渡らない。本人の次の
+    手番のプロンプトにのみ再注入される（llm/llm_agent.py::LLMAgent._memory）。
     """
     data = extract_json(text)
     if data is None:
@@ -133,7 +149,12 @@ def extract_memory(text: str) -> str | None:
     memory = data.get("memory")
     if not isinstance(memory, str) or not memory.strip():
         return None
-    return memory.strip()[:MEMORY_MAX_LENGTH]
+    stripped = memory.strip()
+    return MemoryResult(
+        text=stripped[:MEMORY_MAX_LENGTH],
+        raw_chars=len(stripped),
+        truncated=len(stripped) > MEMORY_MAX_LENGTH,
+    )
 
 
 def parse_response(text: str, player_id: str, phase: str) -> tuple[dict[str, Any] | None, Action]:

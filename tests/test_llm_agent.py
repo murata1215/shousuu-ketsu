@@ -177,28 +177,70 @@ def test_commit_logs_vote_num_on_log_call(tmp_path):
     assert entry["vote_num"] == 4
 
 
-# --- reflect（ラウンド単位。vote_numは持たない） ---
+# --- reflect（投票単位。v0.4.3でvote_num・is_round_endを持つ） ---
 
 def test_reflect_updates_memory(tmp_path):
     text = json.dumps({"memory": "次は様子を見る"})
     agent, _, _ = _make_agent(texts=[text], tmp_path=tmp_path)
-    agent.reflect(_dummy_player_state(), 1, _dummy_visible_state())
+    agent.reflect(_dummy_player_state(), 1, 2, _dummy_visible_state(), is_round_end=False)
     assert agent._memory == "次は様子を見る"
 
 
 def test_reflect_keeps_old_memory_on_failure(tmp_path):
     agent, _, _ = _make_agent(texts=["壊れています"], tmp_path=tmp_path)
     agent._memory = "以前のメモ"
-    agent.reflect(_dummy_player_state(), 1, _dummy_visible_state())
+    agent.reflect(_dummy_player_state(), 1, 2, _dummy_visible_state(), is_round_end=False)
     assert agent._memory == "以前のメモ"
 
 
-def test_reflect_logs_none_vote_num(tmp_path):
+def test_reflect_logs_vote_num(tmp_path):
+    """#55・#56: 振り返りの呼び出しの記録にvote_numが入る（v0.4.3でラウンド単位
+    からNoneだったのを、投票ごとの振り返りに合わせて実際のvote_numへ変えた）"""
     text = json.dumps({"memory": "m"})
     agent, _, logger = _make_agent(texts=[text], tmp_path=tmp_path)
-    agent.reflect(_dummy_player_state(), 2, _dummy_visible_state())
+    agent.reflect(_dummy_player_state(), 2, 3, _dummy_visible_state(), is_round_end=False)
     entry = logger.entries[-1]
-    assert entry["vote_num"] is None
+    assert entry["round_num"] == 2
+    assert entry["vote_num"] == 3
+
+
+def test_reflect_truncates_memory_at_1000_chars_and_logs_truncation(tmp_path):
+    """#66: 1,000字を超えるメモは切り捨てられ、切り捨てたことが記録に残る"""
+    long_memory = "あ" * 1_200
+    text = json.dumps({"memory": long_memory})
+    agent, _, logger = _make_agent(texts=[text], tmp_path=tmp_path)
+    agent.reflect(_dummy_player_state(), 1, 1, _dummy_visible_state(), is_round_end=False)
+    assert agent._memory == "あ" * 1_000
+    memory_entries = [e for e in logger.entries if e.get("memory_record")]
+    assert len(memory_entries) == 1
+    assert memory_entries[0]["memory_chars"] == 1_200
+    assert memory_entries[0]["memory_truncated"] is True
+
+
+def test_negotiate_response_memory_field_does_not_update_memory(tmp_path):
+    """#66: 交渉の応答にmemoryが入っていても、メモは書き換わらない
+    （メモを書き換えられるのは振り返りのときだけ、§9.4）"""
+    text = json.dumps({
+        "strategy": {"reason": "r", "emotion": "楽"}, "action": {"type": "pass"},
+        "memory": "交渉からの書き換えのつもり",
+    })
+    agent, _, _ = _make_agent(texts=[text], tmp_path=tmp_path)
+    agent._memory = "もとのメモ"
+    agent.negotiate(_dummy_player_state(), 1, 1, 1, _dummy_visible_state())
+    assert agent._memory == "もとのメモ"
+
+
+def test_commit_response_memory_field_does_not_update_memory(tmp_path):
+    """#66: 投票（Commit）の応答にmemoryが入っていても、メモは書き換わらない"""
+    text = json.dumps({
+        "strategy": {"reason": "r", "emotion": "楽"},
+        "action": {"type": "vote_commit", "vote": "YES"},
+        "memory": "投票からの書き換えのつもり",
+    })
+    agent, _, _ = _make_agent(texts=[text], tmp_path=tmp_path)
+    agent._memory = "もとのメモ"
+    agent.commit(_dummy_player_state(), 1, 1, _dummy_visible_state())
+    assert agent._memory == "もとのメモ"
 
 
 # --- post_game_reflect ---

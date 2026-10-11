@@ -117,16 +117,20 @@ class Game:
         self._question_cursor: int = 0
         """次に使う質問のインデックス（試合を通した連番、§5.1）"""
 
-        self._remaining_ids: set[str] = set()
-        self._eliminated_ids: set[str] = set()
-        self._consecutive_ties: int = 0
-        self._pot: int = 0
+        self._remaining_ids: set[str] = set()      # ラウンド単位（ラウンド開始でリセット）
+        self._eliminated_ids: set[str] = set()     # ラウンド単位（ラウンド開始でリセット）
+        self._consecutive_ties: int = 0            # ラウンド単位（ラウンド開始でリセット）
+        self._pot: int = 0                         # ラウンド単位（ラウンド開始でリセット）
 
-        self._round_messages: list[dict[str, Any]] = []
-        """現在のラウンドの会話（全体発言・DM、§9.4）。ラウンド開始でリセットし、
-        投票をまたいでも消さない（サイクル4.2でラウンド単位に修正。各要素は
-        vote_num・turnを持つ）"""
+        self._vote_messages: list[dict[str, Any]] = []
+        """現在の投票の会話（全体発言・DM、§9.4）。投票ループの先頭（投票単位）で
+        リセットする（v0.4.3で会話の引き継ぎがラウンド単位から投票単位に変わった。
+        サイクル4.2の「ラウンド単位」は廃止。各要素はvote_num・turnを持つ）。
+        CLAUDE.md落とし穴⑪: この状態は投票単位であり、_phase_negotiationの中では
+        リセットしない（_run_roundの投票ループ先頭だけでリセットする）"""
         self._round_established_seqs: list[int] = []
+        """現在のラウンドで成立した契約のcontract_seq一覧（ラウンド単位。
+        _run_roundのラウンド開始でリセットする）"""
         self._current_vote_auto_ids: set[str] = set()
         self._last_action_error: dict[str, dict[str, Any]] = {}
         """player_id -> 直前の不成立の理由（§7.5）。
@@ -135,12 +139,12 @@ class Game:
 
         self._round_vote_outcomes: list[VoteOutcome] = []
         """現在のラウンドで終わった投票（§8.1: 次の投票のOpenから全員に渡す。
-        ラウンド開始でリセットする）"""
+        ラウンド単位。ラウンド開始でリセットする）"""
 
         self._round_turn_contract_counts: list[dict[str, int]] = []
         """現在のラウンドの各巡の契約成立本数
         [{"vote_num", "turn", "count"}, …]（§8.1: 次の手番から渡す。
-        ラウンド開始でリセットする）"""
+        ラウンド単位。ラウンド開始でリセットする）"""
 
         self._last_vote_outcome: VoteOutcome | None = None
         self._last_round_outcome: RoundOutcome | None = None
@@ -165,7 +169,6 @@ class Game:
             is_final_round = round_num == self.config.num_rounds
 
             self._run_round(round_num, is_final_round=is_final_round)
-            self._phase_reflect(round_num)
 
             if self._stop_after_round is not None and round_num >= self._stop_after_round:
                 stopped_early = round_num < self.config.num_rounds
@@ -195,7 +198,6 @@ class Game:
         self._round_established_seqs = []
         self._round_vote_outcomes = []
         self._round_turn_contract_counts = []
-        self._round_messages = []
 
         vote_num = 0
         round_over = False
@@ -209,6 +211,10 @@ class Game:
                     f"R{round_num}: vote_num exceeded max_votes_per_round "
                     f"({self.config.max_votes_per_round})",
                 )
+
+            # 投票単位のリセット（§9.4、v0.4.3）。_phase_negotiationの中では
+            # リセットしない（CLAUDE.md落とし穴⑪）。
+            self._vote_messages = []
 
             max_turns = self._negotiation_max_turns(vote_num, self._round_vote_outcomes)
 
@@ -245,6 +251,11 @@ class Game:
             self._last_vote_outcome = outcome
             round_over = outcome.round_over
 
+            if not round_over:
+                # 途中の投票（決着してラウンド続行、またはやり直し）の振り返り
+                # （§9.4）。この投票の精算の直後、ラウンドの精算・利息の前に行う。
+                self._phase_reflect(round_num, vote_num, is_round_end=False)
+
         votes_in_round = self._round_vote_outcomes
         aborted = votes_in_round[-1].result == "abort"
         round_settlement_shortfall_ids = sorted(
@@ -265,6 +276,11 @@ class Game:
         )
         self._assert_cash_non_negative(round_num, None, "finance")
 
+        # ラウンドの最後の投票の振り返り（§9.4）。ラウンドの精算＋利息の計上の後
+        # （今までの「ラウンドの終わりの振り返り」と同じ位置）。同じ投票で2回は
+        # 行わない（round_overの真偽で上と排他）。
+        self._phase_reflect(round_num, vote_num, is_round_end=True)
+
     def _negotiation_max_turns(
         self, vote_num: int, votes_in_round: list[VoteOutcome],
     ) -> int:
@@ -281,24 +297,30 @@ class Game:
             return self.config.negotiation_max_turns_next
         return self.config.negotiation_max_turns_retry
 
-    def _phase_reflect(self, round_num: int) -> None:
+    def _phase_reflect(self, round_num: int, vote_num: int, *, is_round_end: bool) -> None:
         """
-        ラウンド終了後の振り返り（§9.4）を全員へ呼ぶ。
+        投票終了後の振り返り（§9.4、v0.4.3）を全員へ呼ぶ。
+
+        呼び出し元（_run_round）は、途中の投票の後（is_round_end=False、その投票の
+        精算の直後）と、ラウンドの最後の投票の後（is_round_end=True、ラウンドの
+        精算＋利息の計上の後）の2か所から、round_overの真偽で排他に呼ぶ。
+        退場者を含む全員に求める（§9.4）。
 
         3段構え: A. 可視状態の構築は逐次、B. agent.reflect()の呼び出しは
         max_parallel_agents>1ならThreadPoolExecutorで並列、C. reflect()は
         戻り値を返さずログも出さないため、Cで行うことは無い。
         """
-        last_vote_num = self._last_vote_outcome.vote_num if self._last_vote_outcome else 1
         pending = [
             (pid, self.players[pid], self._build_visible_state(
-                round_num, last_vote_num, for_player_id=pid,
+                round_num, vote_num, for_player_id=pid,
             ))
             for pid in sorted(self.agents)
         ]
 
         def _call(pid: str, player: PlayerState, visible_state: dict[str, Any]) -> None:
-            self.agents[pid].reflect(player, round_num, visible_state)
+            self.agents[pid].reflect(
+                player, round_num, vote_num, visible_state, is_round_end=is_round_end,
+            )
 
         if self._max_parallel_agents > 1 and len(pending) > 1:
             with ThreadPoolExecutor(max_workers=self._max_parallel_agents) as pool:
@@ -503,9 +525,9 @@ class Game:
         早期終了する。巡が尽きた後（早期終了も含む）、この投票で提案され
         署名がそろわなかった契約を失効させる（§6.1）。
 
-        会話（_round_messages）はここでリセットしない。同じラウンドの中では
-        投票をまたいで引き継ぐため、ラウンド開始時（_run_round）だけで
-        リセットする（§9.4、サイクル4.2で修正）。
+        会話（_vote_messages）はここでリセットしない。v0.4.3では投票単位なので、
+        投票ループの先頭（_run_round）だけでリセットする（§9.4、v0.4.3で
+        サイクル4.2のラウンド単位から投票単位に戻した。CLAUDE.md落とし穴⑪）。
         """
         all_ids = sorted(self.players.keys())
 
@@ -616,7 +638,7 @@ class Game:
             集計に使う）
         """
         if isinstance(action, DmAction):
-            self._round_messages.append({
+            self._vote_messages.append({
                 "type": "dm", "from": pid, "to": action.to,
                 "message": action.message, "vote_num": vote_num, "turn": turn,
             })
@@ -631,7 +653,7 @@ class Game:
             return 0
 
         if isinstance(action, BroadcastAction):
-            self._round_messages.append({
+            self._vote_messages.append({
                 "type": "broadcast", "from": pid, "to": None,
                 "message": action.message, "vote_num": vote_num, "turn": turn,
             })
@@ -907,12 +929,13 @@ class Game:
 
     def _visible_messages(self, for_player_id: str) -> list[dict[str, Any]]:
         """
-        このラウンドのメッセージのうち、for_player_id に見える分だけを返す
-        （§8: 全体発言は公開、DMは当事者のみ。§9.4: ラウンドの中は投票をまたいで
-        全部渡す。他人どうしのDMは渡さない）
+        この投票のメッセージのうち、for_player_id に見える分だけを返す
+        （§8: 全体発言は公開、DMは当事者のみ。§9.4（v0.4.3）: 会話はその投票の
+        中だけ引き継ぐ。投票が変わると前の投票の会話は渡らない。他人どうしの
+        DMは渡さない）
         """
         visible = []
-        for m in self._round_messages:
+        for m in self._vote_messages:
             if m["type"] == "broadcast":
                 visible.append(m)
             elif m["type"] == "dm" and for_player_id in (m["from"], m["to"]):

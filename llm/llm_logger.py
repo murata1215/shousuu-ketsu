@@ -255,6 +255,34 @@ class LLMLogger:
             except Exception:
                 pass
 
+    def log_memory_written(
+        self, *, player_id: str, model_id: str, round_num: int, vote_num: int | None,
+        memory_chars: int, memory_truncated: bool,
+    ) -> None:
+        """
+        振り返りで書き換わったメモの字数を記録する軽量マーカー行（サイクル4.2c新設）。
+
+        `log_invalid_response`と同じ作り: その呼び出し自体は`log_call()`が
+        既に記録済みで、呼び出し回数カウントには影響しない別行。
+        `scripts/summarize_trial.py`が席ごとのメモの字数の中央値・最大・
+        切り捨て件数を集計するための注記（メモを書き換えられるのは
+        振り返りのときだけ、§9.4）。
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
+            "player_id": player_id, "model_id": model_id, "phase": "reflect",
+            "round_num": round_num, "vote_num": vote_num, "memory_record": True,
+            "memory_chars": memory_chars, "memory_truncated": memory_truncated,
+            "api_called": True, "budget_blocked": False, "cost_usd": 0.0,
+        }
+        with self._lock:
+            self._entries.append(entry)
+            try:
+                self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                self._file.flush()
+            except Exception:
+                pass
+
     def close(self) -> None:
         """ファイルハンドルを閉じる"""
         with self._lock:

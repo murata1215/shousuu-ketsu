@@ -294,7 +294,7 @@ PROMPT_COVERAGE: dict[str, str] = {
     "round_contract_counts": "## このラウンドで成立した契約の本数（巡ごと）",
     "my_contracts": "## あなたが当事者の契約（成立済み）",
     "contracts_pending": "## 署名待ちの契約提案",
-    "messages": "## このラウンドの会話",
+    "messages": "## この投票の会話",
 }
 
 # last_vote_result/last_round_resultは、round_vote_results/round_resultsが
@@ -347,6 +347,58 @@ def _render_situation_block(visible_state: dict[str, Any], player_id: str) -> li
     return lines
 
 
+def _render_reflection_situation_block(
+    visible_state: dict[str, Any], player_id: str, *, is_round_end: bool,
+) -> list[str]:
+    """
+    振り返りの「今の場面」（§9.4、v0.4.3）
+
+    交渉・投票の「今の場面」（これから起きる投票の情報）とは違い、たった今
+    終わった投票（ラウンドの最後の投票ならラウンドの結果）を示す。ラウンドの
+    最後の投票では、支払い前の山の額ではなくラウンドの結果で示す
+    （§11.8 #15・C-6）。
+    """
+    round_num = visible_state["round_num"]
+    remaining_ids = visible_state["remaining_ids"]
+    eliminated_ids = visible_state["eliminated_ids"]
+    lines = ["\n## 今の場面"]
+
+    vote_results = visible_state.get("round_vote_results") or []
+    if vote_results:
+        lines.extend(f"  {ln}" for ln in _render_vote_result_lines(vote_results[-1]))
+
+    if is_round_end:
+        round_results = visible_state.get("round_results") or []
+        if round_results:
+            r = round_results[-1]
+            if r["aborted"]:
+                if r["destroyed_pot"]:
+                    lines.append(f"  ラウンドの結果: 打ち切り。山{yen(r['destroyed_pot'])}は消滅")
+                else:
+                    lines.append(
+                        f"  ラウンドの結果: 打ち切り。山{yen(r['carryover_out'])}を"
+                        "次のラウンドへ持ち越し",
+                    )
+            else:
+                winners = ", ".join(r["winner_ids"])
+                lines.append(
+                    f"  ラウンドの結果: 勝ち残り {winners}"
+                    f"（1人あたり{yen(r['payout_per_winner'])}）",
+                )
+    else:
+        lines.append(f"  山: {yen(visible_state['pot'])}")
+
+    lines.append(f"  残っている人（{len(remaining_ids)}人）: {', '.join(remaining_ids) or 'なし'}")
+    lines.append(f"  退場者（{len(eliminated_ids)}人）: {', '.join(eliminated_ids) or 'なし'}")
+    lines.append(f"  やり直しの連続回数: {visible_state['consecutive_ties']}")
+    if player_id in eliminated_ids:
+        lines.append(
+            f"  あなた（{player_id}）はこのラウンド（R{round_num}）で退場しています。"
+            "このラウンドの投票はできません。次のラウンドには戻ります。"
+        )
+    return lines
+
+
 def _render_last_action_error_block(visible_state: dict[str, Any], config: GameConfig) -> list[str]:
     """直前の行動の結果（§7.5: 不成立の理由を日本語で本人にだけ渡す）"""
     err = visible_state.get("my_last_action_error")
@@ -387,8 +439,17 @@ def _render_obligations_due_lines(obligations_due: list[dict[str, Any]], config:
     return lines
 
 
-def _render_my_finance_block(visible_state: dict[str, Any], config: GameConfig) -> list[str]:
-    """あなたの財務通知（本人のみ。§7.5。現在順位を含む、承認済み決定3）"""
+def _render_my_finance_block(
+    visible_state: dict[str, Any], config: GameConfig,
+    *, is_round_end: bool = False, is_final_round: bool = False,
+) -> list[str]:
+    """
+    あなたの財務通知（本人のみ。§7.5。現在順位を含む、承認済み決定3）
+
+    is_round_end=True（振り返りで、ラウンドの最後の投票・利息の計上の後）なら、
+    「今ラウンドの利息見込み」ではなく、次のラウンドの見込みだとわかる書き方にする
+    （§11.8 #15・C-6）。最終ラウンドなら次のラウンドが無いことを書く。
+    """
     fin = visible_state.get("my_finance")
     lines = ["\n## あなたの財務通知（本人のみ）"]
     if not fin:
@@ -396,13 +457,19 @@ def _render_my_finance_block(visible_state: dict[str, Any], config: GameConfig) 
         return lines
     pre_pct = pct(config.interest_rate_pre_num, config.interest_rate_pre_den)
     post_pct = pct(config.interest_rate_post_num, config.interest_rate_post_den)
+    if not is_round_end:
+        interest_line = f"  今ラウンドの利息見込み: {yen(fin['interest_forecast'])}"
+    elif is_final_round:
+        interest_line = "  次のラウンドの利息見込み: 次のラウンドはありません（利息の計上は終わりました）"
+    else:
+        interest_line = f"  次のラウンドの利息見込み: {yen(fin['interest_forecast'])}"
     lines.extend([
         f"  現金: {yen(fin['cash'])}",
         f"  開始前の借金（{pre_pct}%・返済不可）: {yen(fin['debt_pre'])}",
         f"  開始後の借金（{post_pct}%）: {yen(fin['debt_post'])}",
         f"  借金合計: {yen(fin['total_debt'])}",
         f"  残り借入枠: {yen(fin['remaining_credit'])}",
-        f"  今ラウンドの利息見込み: {yen(fin['interest_forecast'])}",
+        interest_line,
     ])
     lines.extend(_render_obligations_due_lines(fin.get("obligations_due") or [], config))
     rank = visible_state.get("my_rank")
@@ -579,10 +646,15 @@ def _render_contracts_pending_block(
     visible_state: dict[str, Any], player_id: str, config: GameConfig,
 ) -> list[str]:
     """
-    署名待ちの契約提案（§9: contract_id・内容・署名の方法を必ず当事者に見せる）
+    署名待ちの契約提案（§9/§7.5: contract_id・内容・署名の方法を必ず当事者に見せる。
+    自分が署名済みかどうかも示す（#63）。
 
     visible_stateは for_player_id が当事者の提案だけを contracts_pending に
     含んでいる（engine/game.py側で絞り込み済み）。
+
+    自分が署名済みの提案には「あなたは署名済み」と書き、署名の送り方の行は
+    出さない（試走で、不成立になった行動12件のうち11件が署名済みの提案への
+    もう一度の署名だった。§11.8 #11）。未署名の当事者は今までどおり書く。
     """
     pending = visible_state.get("contracts_pending") or []
     lines = ["\n## 署名待ちの契約提案"]
@@ -599,17 +671,20 @@ def _render_contracts_pending_block(
         for ob in c.get("obligations", []):
             is_mine = ob["obligor"] == player_id
             lines.append(f"    - {_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}")
-        lines.append(
-            f'    署名するには {{"type": "contract_sign", "contract_id": "{c["contract_id"]}"}} を送る',
-        )
+        if player_id in c["signed_by"]:
+            lines.append("    あなたは署名済み")
+        else:
+            lines.append(
+                f'    署名するには {{"type": "contract_sign", "contract_id": "{c["contract_id"]}"}} を送る',
+            )
     return lines
 
 
 def _render_messages_block(visible_state: dict[str, Any]) -> list[str]:
-    """このラウンドの会話（どの投票の何巡目の発言かが分かる形。§9.4）"""
+    """この投票の会話（どの巡の発言かが分かる形。§9.4、v0.4.3で投票単位になった）"""
     round_num = visible_state["round_num"]
     messages = visible_state.get("messages") or []
-    lines = ["\n## このラウンドの会話"]
+    lines = ["\n## この投票の会話"]
     if not messages:
         lines.append("  まだありません")
         return lines
@@ -624,18 +699,28 @@ def _render_messages_block(visible_state: dict[str, Any]) -> list[str]:
 
 def _render_state_body(
     visible_state: dict[str, Any], player_id: str, config: GameConfig, memory: str | None,
+    *, is_reflection: bool = False, is_round_end: bool = False,
 ) -> list[str]:
     """
     手番ごとの文面の共通本体（承認済み決定3の見出し順）。
 
-    交渉・投票（Commit）・ラウンドの終わりの振り返りは、見出しの行と
-    末尾の指示だけを呼び出し側で変え、本体の描画はここに1本化する。
+    交渉・投票（Commit）・振り返りは、見出しの行と末尾の指示だけを呼び出し側で
+    変え、本体の描画はここに1本化する。振り返りだけ「今の場面」と利息見込みの
+    書き方が異なる（is_reflection・is_round_end、§9.4・C-6）。
     """
     lines: list[str] = []
     lines.extend(_render_memory_block(memory))
-    lines.extend(_render_situation_block(visible_state, player_id))
+    if is_reflection:
+        lines.extend(_render_reflection_situation_block(
+            visible_state, player_id, is_round_end=is_round_end,
+        ))
+    else:
+        lines.extend(_render_situation_block(visible_state, player_id))
     lines.extend(_render_last_action_error_block(visible_state, config))
-    lines.extend(_render_my_finance_block(visible_state, config))
+    lines.extend(_render_my_finance_block(
+        visible_state, config, is_round_end=is_round_end,
+        is_final_round=visible_state["round_num"] == config.num_rounds,
+    ))
     lines.extend(_render_initial_loans_block(visible_state))
     lines.extend(_render_public_ranks_history_block(visible_state, config))
     lines.extend(_render_round_vote_results_block(visible_state))
@@ -694,29 +779,44 @@ def build_commit_prompt(
 def build_reflection_prompt(
     player_state: Any,
     round_num: int,
+    vote_num: int,
     visible_state: dict[str, Any],
     config: GameConfig,
     *,
+    is_round_end: bool,
     memory: str | None = None,
 ) -> str:
     """
-    ラウンド終了後の振り返り（引き継ぎメモ）用のユーザープロンプト（§9.4）
+    投票終了後の振り返り（引き継ぎメモ）用のユーザープロンプト（§9.4、v0.4.3）
 
-    LLMは1-shot呼出しで会話履歴を持たず、次ラウンドへ持ち越せるのはここで
-    書く自由記述メモ1枚だけ。契約・投票結果・ラウンドの結果・順位は手番の
-    たびに提示されるので、メモに書き写す必要はないことを事実として伝える
-    （承認済み決定8）。
+    v0.4.3で「ラウンドの終わりと試合後」から「投票が終わるたびと試合後」に
+    変わった。LLMは1-shot呼出しで会話履歴を持たず、次の投票（ラウンドの
+    最後の投票ならラウンドの最後の投票なら次のラウンド）へ持ち越せるのは
+    ここで書く自由記述メモ1枚だけ。契約・投票結果・ラウンドの結果・順位・
+    お金の出入りの記録は手番のたびに提示されるので、メモに書き写す必要は
+    ないことを事実として伝える。
     """
-    heading = f"=== R{round_num} / 振り返り（引き継ぎメモ） ==="
+    heading = f"=== R{round_num}V{vote_num} / 振り返り（引き継ぎメモ） ==="
     lines: list[str] = [heading]
-    lines.extend(_render_state_body(visible_state, player_state.player_id, config, memory))
+    lines.extend(_render_state_body(
+        visible_state, player_state.player_id, config, memory,
+        is_reflection=True, is_round_end=is_round_end,
+    ))
+    if is_round_end:
+        scope, next_scope, next_unit = "このラウンド", "次のラウンド以降", "ラウンド"
+    else:
+        scope, next_scope, next_unit = "この投票", "次の投票以降", "投票"
     lines.append(
-        f"\nこのラウンドを終えました。次のラウンド以降の自分に残したいことを"
+        f"\n{scope}を終えました。{next_scope}の自分に残したいことを"
         f"{MEMORY_MAX_LENGTH}字以内で自由に書いてください。\n"
         "形式は自由（箇条書き・散文・表、何でも構いません）。何を書き、何を書かないかもあなたの判断です。\n"
         "古い情報を現在の事実として書かないでください（例: 「R3時点ではP04と同盟していた」"
         "のように、いつの情報かを明記する）。\n"
-        "契約・投票結果・ラウンドの結果・順位は手番のたびに提示されるので、書き写す必要はありません。\n"
+        f"次の{next_unit}では、この投票の会話は提示されません。引き継がれるのは、"
+        "ここで書くメモ1枚だけです。今のメモは、ここで書くメモに置き換わります。"
+        f"{MEMORY_MAX_LENGTH}字を超えた分は切り捨てられます。\n"
+        "契約・投票結果・ラウンドの結果・順位・お金の出入りの記録は手番のたびに"
+        "提示されるので、書き写す必要はありません。\n"
         "このフェイズでは action や strategy を出力しないでください。"
         '出力は次のJSON形式だけです: {"memory": "（ここにメモを書く）"}\n'
         + OBJECTIVE_REMINDER_LINE,

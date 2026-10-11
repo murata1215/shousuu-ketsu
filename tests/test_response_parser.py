@@ -324,7 +324,25 @@ def test_extract_memory_returns_none_for_missing_field():
 
 
 def test_extract_memory_returns_value():
-    assert extract_memory('{"memory": "次は気をつける"}') == "次は気をつける"
+    result = extract_memory('{"memory": "次は気をつける"}')
+    assert result.text == "次は気をつける"
+    assert result.raw_chars == 7
+    assert result.truncated is False
+
+
+def test_extract_memory_truncates_at_1000_chars():
+    """サイクル4.2c: メモの上限が500→1000に拡大された（§9.4）"""
+    long_memory = "あ" * 1_500
+    result = extract_memory(json.dumps({"memory": long_memory}))
+    assert result.text == "あ" * 1_000
+    assert result.raw_chars == 1_500
+    assert result.truncated is True
+
+
+def test_extract_memory_not_truncated_when_within_limit():
+    result = extract_memory(json.dumps({"memory": "あ" * 1_000}))
+    assert result.raw_chars == 1_000
+    assert result.truncated is False
 
 
 # --- 試合後の振り返り（§9.4） ---

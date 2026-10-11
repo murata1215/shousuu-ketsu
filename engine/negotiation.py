@@ -85,18 +85,25 @@ class PlayerAgent(ABC):
         self,
         player_state: PlayerState,
         round_num: int,
+        vote_num: int,
         visible_state: dict,
+        *,
+        is_round_end: bool,
     ) -> None:
         """
-        ラウンド終了後の振り返り機会（既定は何もしない、§9.4: 振り返りは
-        各ラウンドの終わりと試合後に行う。投票ごとには行わない）
+        投票終了後の振り返り機会（既定は何もしない、§9.4: v0.4.3で
+        「ラウンドの終わりと試合後」から「投票が終わるたびと試合後」に変わった）
 
         Bot/StubAgentはオーバーライド不要。LLMAgent導入時に使う想定のフック。
 
         Args:
             player_state: 自分のプレイヤー状態
-            round_num: 終了したラウンドの番号
-            visible_state: 公開情報の辞書（当ラウンドの結果を含む）
+            round_num: ラウンド番号
+            vote_num: 終了した投票の番号（v0.4.3新設）
+            visible_state: 公開情報の辞書（当該投票までの結果を含む）
+            is_round_end: ラウンドの最後の投票（ラウンドの精算＋利息の計上の後）かどうか。
+                engine側（_run_round のround_overの判定）だけが決め、文面層で
+                再判定しない（negotiation_max_turnsと同じ役割分担、CLAUDE.md落とし穴④）
         """
         return None
 

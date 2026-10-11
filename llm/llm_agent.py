@@ -162,9 +162,8 @@ class LLMAgent(PlayerAgent):
                 self.last_emotion = None
                 return PassAction(player_id=player_state.player_id)
 
-            new_memory = extract_memory(text)
-            if new_memory is not None:
-                self._memory = new_memory
+            # メモを書き換えられるのは振り返りのときだけ（§9.4、v0.4.3）。
+            # 交渉の応答にmemoryが入っていても無視する（#66）。
 
             try:
                 strategy, action = parse_response(text, player_state.player_id, "negotiation")
@@ -213,9 +212,8 @@ class LLMAgent(PlayerAgent):
         if text is None:
             return None  # type: ignore[return-value]
 
-        new_memory = extract_memory(text)
-        if new_memory is not None:
-            self._memory = new_memory
+        # メモを書き換えられるのは振り返りのときだけ（§9.4、v0.4.3）。
+        # 投票の応答にmemoryが入っていても無視する（#66）。
 
         try:
             strategy, action = parse_response(text, player_state.player_id, "commit")
@@ -234,25 +232,35 @@ class LLMAgent(PlayerAgent):
             return action.vote
         return None  # type: ignore[return-value]
 
-    def reflect(self, player_state: PlayerState, round_num: int, visible_state: dict) -> None:
+    def reflect(
+        self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict,
+        *, is_round_end: bool,
+    ) -> None:
         """
-        ラウンド終了後の振り返り（引き継ぎメモ、§9.4）。失敗時はメモを更新しない
+        投票終了後の振り返り（引き継ぎメモ、§9.4、v0.4.3）。失敗時はメモを更新しない
 
-        ラウンド単位のフックのため vote_num は持たない（v0.4: 振り返りは
-        ラウンドの終わりと試合後に行い、投票ごとには行わない）。
+        v0.4.3で「ラウンドの終わりと試合後」から「投票が終わるたびと試合後」に
+        変わった。メモを書き換えられるのはこのメソッドだけ（negotiate/commitの
+        応答のmemoryは読まない、#66）。
         """
         prompt = build_reflection_prompt(
-            player_state, round_num, visible_state, self.config, memory=self._memory or None,
+            player_state, round_num, vote_num, visible_state, self.config,
+            is_round_end=is_round_end, memory=self._memory or None,
         )
         text, _usage = self._call(
             self._system_prompt, prompt, max_tokens=1200, phase="reflect",
-            round_num=round_num, vote_num=None,
+            round_num=round_num, vote_num=vote_num,
         )
         if text is None:
             return
         new_memory = extract_memory(text)
         if new_memory is not None:
-            self._memory = new_memory
+            self._memory = new_memory.text
+            self.llm_logger.log_memory_written(
+                player_id=self.player_id, model_id=self.model_info.model_id,
+                round_num=round_num, vote_num=vote_num,
+                memory_chars=new_memory.raw_chars, memory_truncated=new_memory.truncated,
+            )
 
     def post_game_reflect(self, post_game_context: dict[str, Any]) -> dict[str, Any] | None:
         """試合完全終了後の振り返り（§9.4）。ゲーム完全終了後に全プレイヤーへ1回だけ呼ばれる"""

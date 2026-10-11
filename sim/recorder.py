@@ -15,6 +15,12 @@ Game本体の外からこの記録を使う。
 ままで、v0.4のengine/game.py（vote_num付きで位置引数呼び出し）と
 噛み合わずTypeErrorになっていた（サイクル4.0でPlayerAgent I/Fに
 vote_numを追加したときの移植漏れ）。vote_numを追加して直した。
+
+サイクル4.2c: v0.4.3でreflect()が「ラウンドの終わりと試合後」から
+「投票が終わるたびと試合後」に変わり、signatureにvote_num・is_round_endが
+追加された。history[round_num]への記録は変わらない（最後の書き込みは
+必ずis_round_end=Trueの呼び出し＝ラウンドの精算＋利息の計上の後になる
+ため、Bot検証の数値は従来と同じ）。
 """
 
 from engine.config import GameConfig
@@ -48,6 +54,9 @@ class RecordingAgent(PlayerAgent):
     def commit(self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict) -> Vote:
         return self.inner.commit(player_state, round_num, vote_num, visible_state)
 
-    def reflect(self, player_state: PlayerState, round_num: int, visible_state: dict) -> None:
+    def reflect(
+        self, player_state: PlayerState, round_num: int, vote_num: int, visible_state: dict,
+        *, is_round_end: bool,
+    ) -> None:
         self.history[round_num] = player_state
-        self.inner.reflect(player_state, round_num, visible_state)
+        self.inner.reflect(player_state, round_num, vote_num, visible_state, is_round_end=is_round_end)

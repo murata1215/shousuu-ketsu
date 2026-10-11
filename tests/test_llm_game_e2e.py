@@ -213,14 +213,23 @@ def test_l12r4v6_full_game_with_scripted_llm_agents_completes() -> None:
     ]
     assert len(retry_events) == 1
 
-    # --- ラウンドの終わりの振り返りが全ラウンドで全員に呼ばれていること ---
+    # --- 投票が終わるたびの振り返りが、退場者を含む全員に呼ばれていること（v0.4.3） ---
     # reflect()は戻り値もイベントログも持たないため（engine/game.py::_phase_reflect
-    # のdocstring）、偽AI側の呼び出しログで確認する。
+    # のdocstring）、偽AI側の呼び出しログで確認する。振り返りの回数は、試合全体の
+    # 投票の回数（VOTE_RESOLVEDイベントの件数）と一致する（§9.4: 投票が終わるたびと
+    # 試合後。試合後の振り返りは別カウント、下のPOST_GAME_REFLECTIONで確認する）。
+    total_votes = sum(1 for e in event_logger.events if e.event_type == "VOTE_RESOLVED")
+    assert total_votes > config.num_rounds  # R2にやり直しがあるため投票回数>ラウンド数
     reflect_calls_per_player = [
         sum(1 for c in r.calls if "振り返り（引き継ぎメモ）" in c["messages"][0]["content"])
         for r in responders.values()
     ]
-    assert all(n == config.num_rounds for n in reflect_calls_per_player)
+    assert all(n == total_votes for n in reflect_calls_per_player)
+    # 退場者（R1V1で退場した7人）にも振り返りが求められている
+    for pid in r1v1_eliminated:
+        assert any(
+            "振り返り（引き継ぎメモ）" in c["messages"][0]["content"] for c in responders[pid].calls
+        )
 
     # --- 試合後の振り返り: ゲーム完全終了後に全員へ1回だけ（イベントログにも残る） ---
     post_game_events = [e for e in event_logger.events if e.event_type == "POST_GAME_REFLECTION"]
