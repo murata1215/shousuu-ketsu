@@ -25,7 +25,7 @@ from engine.models import (
     Action, BroadcastAction, ConditionType, ContractProposeAction, ContractSignAction,
     DmAction, ObligationType, PassAction, RepayAction, TransferAction, Vote, VoteCommitAction,
 )
-from llm.constants import MEMORY_MAX_LENGTH
+from llm.constants import MEMORY_TRUNCATE_LENGTH
 
 VALID_EMOTIONS = {"喜", "怒", "哀", "楽", "焦", "疑", "奸"}
 
@@ -148,13 +148,14 @@ class MemoryResult(NamedTuple):
     """extract_memory()の戻り値（サイクル4.2c）。切り捨ての有無を呼び出し元の記録に残すため"""
 
     text: str
-    """切り捨て後のメモ本文（MEMORY_MAX_LENGTH文字以内）"""
+    """切り捨て後のメモ本文（MEMORY_TRUNCATE_LENGTH文字以内）"""
 
     raw_chars: int
     """切り捨て前の文字数"""
 
     truncated: bool
-    """raw_chars > MEMORY_MAX_LENGTH だったか"""
+    """raw_chars > MEMORY_TRUNCATE_LENGTH だったか（サイクル4.2dで1,500字に。
+    文面でAIに求める字数（MEMORY_REQUEST_MAX_LENGTH=1,000字）とは別の値）"""
 
 
 def extract_memory(text: str) -> MemoryResult | None:
@@ -175,9 +176,9 @@ def extract_memory(text: str) -> MemoryResult | None:
         return None
     stripped = memory.strip()
     return MemoryResult(
-        text=stripped[:MEMORY_MAX_LENGTH],
+        text=stripped[:MEMORY_TRUNCATE_LENGTH],
         raw_chars=len(stripped),
-        truncated=len(stripped) > MEMORY_MAX_LENGTH,
+        truncated=len(stripped) > MEMORY_TRUNCATE_LENGTH,
     )
 
 

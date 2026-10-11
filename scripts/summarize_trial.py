@@ -37,7 +37,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from llm.constants import is_truncated_finish_reason  # noqa: E402
+from llm.constants import MEMORY_REQUEST_MAX_LENGTH, is_truncated_finish_reason  # noqa: E402
 from llm.response_parser import extract_json  # noqa: E402
 
 # v0.3形式の記録を検出するための種別（v0.4には存在しない）
@@ -461,6 +461,12 @@ def summarize_seats(
     （サイクル4.2bで最終資産・順位・借入額を追加。サイクル4.2cでその他の
     失敗・文面・省略件数・メモの統計・出力切れを追加）。
 
+    メモの「1,000字を超えた件数」（memory_over_request_count、求める字数
+    MEMORY_REQUEST_MAX_LENGTHを超えたか）と「切り捨てた件数（1,500字超）」
+    （memory_truncated_count、切り捨てる字数MEMORY_TRUNCATE_LENGTHを超えたか）
+    は別の列で出す（サイクル4.2d、§9.4・§11.9 #1。2回目の12席試走では
+    72件のうち18件が1,000字を超え、そのうち17件は1,500字以内だった）。
+
     「その他の失敗」（other_errors）は、時間切れ・拒否429のどちらでもない
     失敗（HTTP 400等、llm/adapters.py::_classify_errorの"server_error"・
     "connection_error"・"other"）。試走でこの列が無く、どこにも表示されない
@@ -498,7 +504,7 @@ def summarize_seats(
             "budget_blocked": budget_blocked_counts.get(pid, 0),
             "elapsed_ms_total": 0.0, "cost_usd_total": 0.0,
             "_user_prompt_chars": [], "messages_omitted_total": 0,
-            "_memory_chars": [], "memory_truncated_count": 0,
+            "_memory_chars": [], "memory_truncated_count": 0, "memory_over_request_count": 0,
         }
 
     by_seat: dict[str, dict[str, Any]] = {pid: _base_row(pid, seat_map[pid]) for pid in sorted(seat_map)}
@@ -509,9 +515,12 @@ def summarize_seats(
             continue
         row = by_seat.setdefault(pid, _base_row(pid, entry.get("model_id")))
         if entry.get("memory_record"):
-            row["_memory_chars"].append(entry.get("memory_chars") or 0)
+            memory_chars = entry.get("memory_chars") or 0
+            row["_memory_chars"].append(memory_chars)
             if entry.get("memory_truncated"):
                 row["memory_truncated_count"] += 1
+            if memory_chars > MEMORY_REQUEST_MAX_LENGTH:
+                row["memory_over_request_count"] += 1
             continue  # log_call()とは別件の軽量な注記行。呼び出し回数には数えない
         if entry.get("invalid_response"):
             row["invalid_responses"] += 1
@@ -715,11 +724,17 @@ def _print_seats(seats: list[dict[str, Any]]) -> None:
 
 
 def _print_seat_text_stats(seats: list[dict[str, Any]]) -> None:
-    """席ごとの文面の字数・上限で省いた発言数・メモの字数の統計（サイクル4.2c）"""
+    """
+    席ごとの文面の字数・上限で省いた発言数・メモの字数の統計（サイクル4.2c）。
+
+    「メモ1000字超」（求める字数MEMORY_REQUEST_MAX_LENGTHを超えた件数）と
+    「メモ切捨(1,500字超)」（切り捨てる字数MEMORY_TRUNCATE_LENGTHを超えた
+    件数）は別の列（サイクル4.2d、§9.4・§11.9 #1）。
+    """
     print("\n--- 席ごとの文面・メモ統計 ---")
     print(
         f"{'席':<6}{'文面字数(中央値)':>14}{'文面字数(最大)':>12}{'省略件数':>8}"
-        f"{'メモ字数(中央値)':>14}{'メモ字数(最大)':>12}{'メモ切捨':>8}",
+        f"{'メモ字数(中央値)':>14}{'メモ字数(最大)':>12}{'メモ1000字超':>10}{'メモ切捨(1500字超)':>14}",
     )
     for s in seats:
         pm = s["user_prompt_chars_median"]
@@ -733,7 +748,8 @@ def _print_seat_text_stats(seats: list[dict[str, Any]]) -> None:
             f"{s['messages_omitted_total']:>8}"
             f"{(f'{mm:.0f}' if mm is not None else '-'):>14}"
             f"{(f'{mx}' if mx is not None else '-'):>12}"
-            f"{s['memory_truncated_count']:>8}",
+            f"{s['memory_over_request_count']:>10}"
+            f"{s['memory_truncated_count']:>14}",
         )
 
 

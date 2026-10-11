@@ -2,7 +2,7 @@
 ルール全文・借入文面の逐語一致テスト（§13）
 
 `llm/prompt_builder.py::RULES_TEMPLATE`/`LOAN_PROMPT_TEMPLATE` が、仕様書
-`doc/uso8000000_shousuu_ketsu_spec_v0_4_3.md` §13.1/§13.2 の本文と1行も
+`doc/uso8000000_shousuu_ketsu_spec_v0_4_4.md` §13.1/§13.2 の本文と1行も
 違わないことを機械的に確かめる。仕様書を書き換えても文面を直し忘れたら落ちる。
 
 サイクル4.2までは「承認済みの6行」を仕様書に足して比較していたが、v0.4.3の
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from llm.prompt_builder import LOAN_PROMPT_TEMPLATE, RULES_TEMPLATE
 
-_SPEC_PATH = Path(__file__).resolve().parent.parent / "doc" / "uso8000000_shousuu_ketsu_spec_v0_4_3.md"
+_SPEC_PATH = Path(__file__).resolve().parent.parent / "doc" / "uso8000000_shousuu_ketsu_spec_v0_4_4.md"
 
 
 def _extract_fenced_block(spec_text: str, heading_pattern: str) -> str:

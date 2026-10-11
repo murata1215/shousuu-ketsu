@@ -325,6 +325,9 @@ def test_summarize_seats_classifies_other_errors_and_reconciles_failure_counts()
     assert s["memory_chars_median"] == 1_000  # [1200, 800] の中央値
     assert s["memory_chars_max"] == 1_200
     assert s["memory_truncated_count"] == 1
+    # サイクル4.2d: 1,200字は求める字数(1,000字)を超えるが切り捨てる字数
+    # (1,500字)は超えない。800字はどちらも超えない
+    assert s["memory_over_request_count"] == 1
 
 
 # --- 出力切れ（finish_reason、サイクル4.2c仕上げC） ---

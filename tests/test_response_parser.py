@@ -377,19 +377,21 @@ def test_extract_memory_returns_value():
     assert result.truncated is False
 
 
-def test_extract_memory_truncates_at_1000_chars():
-    """サイクル4.2c: メモの上限が500→1000に拡大された（§9.4）"""
-    long_memory = "あ" * 1_500
+def test_extract_memory_truncates_at_1500_chars():
+    """サイクル4.2d: 切り捨てる字数が1,000→1,500字に分けられた（§9.4、v0.4.4 §11.9 #1）"""
+    long_memory = "あ" * 1_700
     result = extract_memory(json.dumps({"memory": long_memory}))
-    assert result.text == "あ" * 1_000
-    assert result.raw_chars == 1_500
+    assert result.text == "あ" * 1_500
+    assert result.raw_chars == 1_700
     assert result.truncated is True
 
 
 def test_extract_memory_not_truncated_when_within_limit():
-    result = extract_memory(json.dumps({"memory": "あ" * 1_000}))
-    assert result.raw_chars == 1_000
+    """1,000字を超えていても、1,500字（切り捨てる字数）以内なら切り捨てられない"""
+    result = extract_memory(json.dumps({"memory": "あ" * 1_200}))
+    assert result.raw_chars == 1_200
     assert result.truncated is False
+    assert result.text == "あ" * 1_200
 
 
 # --- 試合後の振り返り（§9.4） ---

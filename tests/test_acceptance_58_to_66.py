@@ -16,7 +16,7 @@ from engine.game import Game
 from engine.models import (
     BroadcastAction, ContractProposeAction, PlayerState, TransferAction, Vote,
 )
-from llm.constants import MEMORY_MAX_LENGTH, TURN_PROMPT_MAX_CHARS
+from llm.constants import MEMORY_TRUNCATE_LENGTH, TURN_PROMPT_MAX_CHARS
 from llm.prompt_builder import build_negotiation_prompt, build_reflection_prompt
 from llm.response_parser import extract_memory
 from tests.helpers import ScriptedAgent, VisibleStateRecordingAgent, make_roster
@@ -437,16 +437,70 @@ def test_acceptance_64_old_messages_omitted_when_body_exceeds_limit() -> None:
         assert f"{m['turn']}巡目" in result.text
 
 
-def test_acceptance_66_memory_truncated_at_1000_and_not_updated_by_negotiate_response() -> None:
+def test_turn_limit_calc_still_works_with_1500_char_memory() -> None:
     """
-    #66: 振り返りで、1,000字を超えるメモを返した。別の席が、交渉の応答に
-    メモを入れて返した → 振り返りのメモは1,000字で切り捨てられ、次の手番の
-    文面に入っている。交渉の応答に入れたメモでは、メモは書き換わらない
+    #64の延長（サイクル4.2d）: メモが1,500字（MEMORY_TRUNCATE_LENGTH）のときも、
+    手番の文面の上限（15,000字）の計算が壊れない（会話を古い発言から省いて
+    収める、残った発言は省かれた発言より新しい）。メモは会話以外の部分なので
+    省かれない（今までどおり）。
     """
-    long_memory = "あ" * 1_500
+    visible_state = {
+        "round_num": 1, "vote_num": 1, "question": "テスト", "pot": 12_000_000,
+        "remaining_ids": [f"P{i:02d}" for i in range(1, 13)], "eliminated_ids": [],
+        "consecutive_ties": 0, "negotiation_max_turns": 10,
+        "initial_loans": {f"P{i:02d}": 1_200_000 for i in range(1, 13)}, "public_ranks_history": {},
+        "round_contract_counts": [], "round_vote_results": [], "round_results": [],
+        "last_vote_result": None, "last_round_result": None,
+        "my_last_action_error": None,
+        "my_contract_status": [], "contracts_pending": [], "my_expired_proposals": [],
+        "my_cash_flow": {"rounds": [], "totals": {
+            "cash_in": 0, "cash_out": 0, "cash_delta": 0,
+            "debt_up": 0, "debt_down": 0, "debt_delta": 0, "borrowed": 0,
+        }},
+        "my_finance": {
+            "cash": 1_200_000, "debt_pre": 1_200_000, "debt_pre_repayable": False,
+            "debt_pre_note": "返済不可（開始前の借金・5%）", "debt_post": 0, "total_debt": 1_200_000,
+            "remaining_credit": 8_800_000, "interest_forecast": 60_000, "obligations_due": [],
+        },
+        "my_rank": {"rank": 1, "tied": True, "n_players": 12},
+        "messages": [
+            {
+                "type": "broadcast", "from": f"P{(i % 12) + 1:02d}", "to": None,
+                "message": "あ" * 400, "vote_num": 1, "turn": i + 1,
+            }
+            for i in range(80)
+        ],
+    }
+    max_memory = "あ" * MEMORY_TRUNCATE_LENGTH
+    result = build_negotiation_prompt(
+        _ps("P01"), 1, 1, 81, visible_state, GameConfig.default_12(), memory=max_memory,
+    )
+
+    assert len(result.text) <= TURN_PROMPT_MAX_CHARS
+    assert result.omitted_messages > 0
+    assert max_memory in result.text
+
+    kept = visible_state["messages"][result.omitted_messages:]
+    for m in kept:
+        assert f"{m['turn']}巡目" in result.text
+
+
+def test_acceptance_66_memory_truncated_at_1500_and_not_updated_by_negotiate_response() -> None:
+    """
+    #66: 振り返りで、1,200字のメモを返した席と、1,600字のメモを返した席が
+    ある。別の席が、交渉の応答にメモを入れて返した → 1,200字のメモはそのまま、
+    1,600字のメモは1,500字で切り捨てられて、次の手番の文面に入っている。
+    交渉の応答に入れたメモでは、メモは書き換わらない（v0.4.4 §9.4・§11.9 #1）
+    """
+    medium_memory = "あ" * 1_200
+    medium_result = extract_memory(json.dumps({"memory": medium_memory}))
+    assert medium_result.truncated is False
+    assert medium_result.text == medium_memory
+
+    long_memory = "あ" * 1_600
     result = extract_memory(json.dumps({"memory": long_memory}))
     assert result.truncated is True
-    assert len(result.text) == MEMORY_MAX_LENGTH
+    assert len(result.text) == MEMORY_TRUNCATE_LENGTH
 
     visible_state = {
         "round_num": 1, "vote_num": 2, "question": "テスト", "pot": 12_000_000,

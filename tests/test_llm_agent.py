@@ -260,16 +260,16 @@ def test_reflect_logs_vote_num(tmp_path):
     assert entry["vote_num"] == 3
 
 
-def test_reflect_truncates_memory_at_1000_chars_and_logs_truncation(tmp_path):
-    """#66: 1,000字を超えるメモは切り捨てられ、切り捨てたことが記録に残る"""
-    long_memory = "あ" * 1_200
+def test_reflect_truncates_memory_at_1500_chars_and_logs_truncation(tmp_path):
+    """#66: 1,500字を超えるメモは切り捨てられ、切り捨てたことが記録に残る（サイクル4.2d）"""
+    long_memory = "あ" * 1_600
     text = json.dumps({"memory": long_memory})
     agent, _, logger = _make_agent(texts=[text], tmp_path=tmp_path)
     agent.reflect(_dummy_player_state(), 1, 1, _dummy_visible_state(), is_round_end=False)
-    assert agent._memory == "あ" * 1_000
+    assert agent._memory == "あ" * 1_500
     memory_entries = [e for e in logger.entries if e.get("memory_record")]
     assert len(memory_entries) == 1
-    assert memory_entries[0]["memory_chars"] == 1_200
+    assert memory_entries[0]["memory_chars"] == 1_600
     assert memory_entries[0]["memory_truncated"] is True
 
 
