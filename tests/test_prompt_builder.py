@@ -386,6 +386,41 @@ def test_commit_prompt_shows_type_b_obligation_and_penalty():
     assert f"{config.penalty_amount:,}円" in text
 
 
+# --- A-2: メモ未作成の案内文が「投票が終わるたびの振り返り」になっていること ---
+
+def test_memory_block_mentions_per_vote_reflection_when_empty(fixture_game):
+    _game, config, _result, snapshots, _r = fixture_game
+    vs = snapshots["P01"][(1, 1, 1)]
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text
+    assert "投票が終わるたびの振り返りで自分で書きます" in text
+    assert "ラウンドの終わりに自分で書きます" not in text
+
+
+# --- A-3: お金の出入りの各行に「いつ」（投票・巡・場面）が出ること ---
+
+def test_cash_flow_entries_show_when_vote_turn_and_phase():
+    agents = make_roster({}, num_players=12)
+    # P02が1巡目・2巡目に発言し、全員パスによる早期終了を避ける（§7.2）
+    agents["P02"].negotiate_actions[(1, 1, 1)] = BroadcastAction(player_id="P02", message="1巡目")
+    agents["P02"].negotiate_actions[(1, 1, 2)] = BroadcastAction(player_id="P02", message="2巡目")
+    agents["P01"].negotiate_actions[(1, 1, 3)] = TransferAction(
+        player_id="P01", to="P02", amount=50_000,
+    )
+    recorder = VisibleStateRecordingAgent(agents["P01"])
+    agents["P01"] = recorder
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=43, logger=EventLogger())
+    game.run()
+    snaps = {(r, v, t): vs for r, v, t, vs in recorder.negotiate_snapshots}
+    # 送金（R1V1の3巡目）の直後、4巡目のvisible_stateに参加費・送金の両方が出る
+    vs = snaps[(1, 1, 4)]
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 4, vs, config).text
+    assert "[R1 参加費]" in text
+    assert "[R1V1 3巡目]" in text
+    assert "参加費: 出金" not in text  # A-3: 見出しに出ているので本文では重ねない
+
+
 # --- 横断テスト1: PROMPT_COVERAGE/PROMPT_SUPERSEDEDがvisible_stateのキー集合と完全一致 ---
 
 def test_prompt_coverage_matches_visible_state_keys_exactly(fixture_game):

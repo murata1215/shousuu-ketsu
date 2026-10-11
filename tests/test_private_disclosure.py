@@ -19,7 +19,10 @@ import random
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.game import Game
-from engine.models import Action, LedgerEntryKind, PassAction, PlayerState, TransferAction, Vote
+from engine.models import (
+    Action, CashMovement, LedgerEntryKind, ObligationPayment, ObligationType,
+    PassAction, PlayerState, TransferAction, Vote,
+)
 from engine.negotiation import PlayerAgent
 from bots.random_contract_bot import RandomContractBot
 from tests.helpers import make_roster
@@ -213,3 +216,39 @@ def test_money_events_reconcile_with_cash_flow_ledger_one_game() -> None:
     assert expected_interest_entries == _count_kind(LedgerEntryKind.INTEREST)
     expected_interest_total = sum(e.data["interest_pre"] + e.data["interest_post"] for e in interest_events)
     assert expected_interest_total == _sum_kind(LedgerEntryKind.INTEREST)
+
+
+# --- A-4: 同じ精算の中では、支払い・受け取りを先に、借入を最後に記録する ---
+
+def test_settlement_cash_flow_records_payments_before_borrowing() -> None:
+    """
+    #A-4（サイクル4.2c）: `Game._record_settlement_cash_flow`は、契約の支払い・
+    受け取りを先に、「この精算での借入」（SETTLEMENT_BORROWING）を最後に記録
+    する。文面はこの記録順をそのまま表示するため、借入の原因になった契約の
+    支払いが、借入の行より前に来る必要がある（判定・配当のロジックは
+    settle_vote/settle_round側のままで、ここでは記録の順番だけを確認する）。
+    """
+    agents = make_roster({}, num_players=2)
+    config = GameConfig.dev_small(num_players=2, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=1, logger=EventLogger())
+
+    movements = [
+        CashMovement(
+            player_id="P01", kind=LedgerEntryKind.SETTLEMENT_BORROWING,
+            amount=50_000, cash_delta=50_000, debt_delta=50_000, borrowed=50_000,
+        ),
+    ]
+    payments = [
+        ObligationPayment(
+            obligation_id="OB1", contract_id="C1", contract_seq=1, ob_index=0,
+            obligor="P01", counterparty="P02", ob_type=ObligationType.TYPE_A_PAYMENT,
+            promised=50_000, paid=50_000,
+        ),
+    ]
+    game._record_settlement_cash_flow(
+        round_num=1, vote_num=1, phase="settlement",
+        movements=movements, payments=payments, scope="vote",
+    )
+
+    kinds_p01 = [e.kind for e in game._cash_flow["P01"]]
+    assert kinds_p01 == [LedgerEntryKind.CONTRACT_PAYMENT_PAID, LedgerEntryKind.SETTLEMENT_BORROWING]

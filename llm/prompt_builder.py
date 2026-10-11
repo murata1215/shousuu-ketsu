@@ -318,7 +318,7 @@ def _render_memory_block(memory: str | None) -> list[str]:
     """引き継ぎのメモを描画する（§9.4。無ければ事実として「まだない」と書く）"""
     lines = ["\n## 引き継ぎのメモ"]
     if not memory:
-        lines.append("  （まだありません。ラウンドの終わりに自分で書きます）")
+        lines.append("  （まだありません。投票が終わるたびの振り返りで自分で書きます）")
     else:
         lines.append(f"  {memory}")
     return lines
@@ -585,33 +585,57 @@ def _render_round_contract_counts_block(visible_state: dict[str, Any]) -> list[s
     return lines
 
 
-def _obligation_fact_sentence(ob: dict[str, Any], *, is_mine: bool, config: GameConfig) -> str:
+def _payment_chunk(target: str, amount_text: str, *, form: str) -> str:
     """
-    義務1件を事実だけの文にする（助言は書かない。§9「自分の義務は『あなたは…』の形」）
+    型A・型Cに共通する「○○へXXを支払う」の部分（§7.5・§9）。formが"must"なら
+    「これから」の文言、"noun"なら状態文で使う名詞形。先頭に半角スペースを含む
+    （呼び出し側の「{subject}」の直後にそのまま連結できる形。サイクル4.2c）。
+    """
+    if form == "must":
+        return f" {target}へ{amount_text}支払わなければならない"
+    return f" {target}へ{amount_text}支払う義務"
+
+
+def _obligation_clause(ob: dict[str, Any], *, is_mine: bool, config: GameConfig, form: str) -> str:
+    """
+    義務1件を1文にする唯一の部品（§7.5・§9「自分の義務は『あなたは…』の形」）。
 
     is_mine=True: 自分が義務者（obligor）。is_mine=False: 相手が義務者（受け取る側の権利）。
+    formが"must"なら「これから」の文言（「〜しなければならない」）。"noun"なら
+    状態の文に使う名詞形（「〜する義務」。既済・不成立・失効の尾を付けるのは
+    呼び出し側の`_obligation_status_sentence`）。金額・条件の組み立てはここに
+    1本だけ置き、`_obligation_fact_sentence`（これから）と
+    `_obligation_status_sentence`（それ以外の状態）の両方がこれを呼ぶ
+    （CLAUDE.md落とし穴④: 同じ内容を2か所で別々に組み立てない）。
     """
     subject = "あなたは" if is_mine else f"{ob['obligor']}は"
     ob_type = ob["ob_type"]
     d = ob.get("details") or {}
     rn, vn = ob["round_num"], ob.get("vote_num")
     label = f"R{rn}V{vn}" if vn is not None else f"R{rn}"
+
     if ob_type == "type_a_payment":
         target = ob["counterparty"] if is_mine else "あなた"
-        return f"{label}: {subject} {target}へ{yen(d.get('amount', 0))}支払わなければならない"
+        amount_text = yen(d.get("amount", 0))
+        return f"{label}: {subject}{_payment_chunk(target, amount_text, form=form)}"
+
     if ob_type == "type_b_vote":
-        penalty = yen(config.penalty_amount)
         who_target = ob["counterparty"] if is_mine else "あなた"
-        return (
-            f"{label}: {subject} {d.get('vote', '?')}へ投票しなければならない"
-            f"（違反時は{who_target}へ違約金{penalty}）"
-        )
+        vote = d.get("vote", "?")
+        if form == "must":
+            penalty = yen(config.penalty_amount)
+            return (
+                f"{label}: {subject} {vote}へ投票しなければならない"
+                f"（違反時は{who_target}へ違約金{penalty}）"
+            )
+        return f"{label}: {subject} {vote}へ投票する義務"
+
     # type_c_conditional
     target = ob["counterparty"] if is_mine else "あなた"
     condition_type = d.get("condition_type")
     condition = d.get("condition") or {}
     if "share_percent" in d:
-        amount_text = f"受け取った山の{d['share_percent']}%"
+        amount_text = f"受け取った山の{d['share_percent']}%を"
     else:
         amount_text = yen(d.get("amount", 0))
     if condition_type == "minority_side":
@@ -620,27 +644,29 @@ def _obligation_fact_sentence(ob: dict[str, Any], *, is_mine: bool, config: Game
         cond_text = f"{label}で{condition.get('target_player', '?')}が少数派に入った場合"
     else:  # wins_round
         cond_text = f"R{rn}で{condition.get('target_player', '?')}が勝ち残った場合"
-    return f"{cond_text}、{subject} {target}へ{amount_text}支払わなければならない"
+    return f"{cond_text}、{subject}{_payment_chunk(target, amount_text, form=form)}"
+
+
+def _obligation_fact_sentence(ob: dict[str, Any], *, is_mine: bool, config: GameConfig) -> str:
+    """義務1件を事実だけの文にする（助言は書かない。§9「自分の義務は『あなたは…』の形」）"""
+    return _obligation_clause(ob, is_mine=is_mine, config=config, form="must")
 
 
 def _obligation_status_sentence(ob: dict[str, Any], *, is_mine: bool, config: GameConfig) -> str:
     """
-    義務1件を事実だけの文にする（助言は書かない。§7.5・§9）。サイクル4.2cで
-    統合。
+    義務1件を事実だけの文にする（助言は書かない。§7.5・§9）。サイクル4.2cで統合。
 
-    statusがpending（これから）なら、既存の_obligation_fact_sentence
-    （「〜しなければならない」）に「（これから）」を足すだけ（既存の
-    部分文字列一致テストと両立する）。それ以外は、済んだこと・型Bを
-    守ったこと・条件が不成立だったこと・失効したことを、動いた額つきで
-    書く。「〜しなければならない」はこれからの義務だけにする（§7.5）。
+    statusがpending（これから）なら、_obligation_fact_sentence（「〜しなければ
+    ならない」）に「（これから）」を足すだけ。それ以外は、_obligation_clause
+    の名詞形（「〜する義務」）に「 → 状態」を続けて書く。どの状態でも義務の
+    中身（主語・条件・金額）は「これから」のときと同じ部品から作り、
+    「〜しなければならない」はこれからの義務だけにする（§7.5）。
     """
     status = ob.get("status", "pending")
     if status == "pending":
         return f"{_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}（これから）"
 
-    rn, vn = ob["round_num"], ob.get("vote_num")
-    label = f"R{rn}V{vn}" if vn is not None else f"R{rn}"
-    subject = "あなたは" if is_mine else f"{ob['obligor']}は"
+    noun_clause = _obligation_clause(ob, is_mine=is_mine, config=config, form="noun")
     target = ob["counterparty"] if is_mine else "あなた"
 
     if status in ("paid", "type_b_violated"):
@@ -648,20 +674,21 @@ def _obligation_status_sentence(ob: dict[str, Any], *, is_mine: bool, config: Ga
         paid = yen(ob.get("paid") or 0)
         if status == "type_b_violated":
             return (
-                f"{label}: {subject} 型Bに違反した"
-                f"（違約金、約束{promised} / 実際に払われた額{paid}、{target}へ）"
+                f"{noun_clause} → 違反した"
+                f"（違約金を {target}へ。約束 {promised} / 実際に払われた額 {paid}）"
             )
-        return f"{label}: {subject} {target}へ済み（約束{promised} / 実際に払われた額{paid}）"
+        if ob["ob_type"] == "type_c_conditional":
+            return f"{noun_clause} → 条件が成立し、済み（約束 {promised} / 実際に払われた額 {paid}）"
+        return f"{noun_clause} → 済み（約束 {promised} / 実際に払われた額 {paid}）"
 
     if status == "type_b_kept":
-        vote = (ob.get("details") or {}).get("vote", "?")
-        return f"{label}: {subject} {vote}へ投票した（型Bを守った）"
+        return f"{noun_clause} → 守った"
 
     if status == "condition_unmet":
-        return f"{label}: {subject}が約束した条件は成立しなかった"
+        return f"{noun_clause} → 条件は成立しなかった（支払いなし）"
 
     # expired
-    return f"{label}: {subject}の義務は失効した"
+    return f"{noun_clause} → 失効した"
 
 
 def _render_my_contract_status_block(
@@ -714,17 +741,47 @@ def _signed_yen(amount: int) -> str:
     return f"+{yen(amount)}" if amount >= 0 else f"-{yen(-amount)}"
 
 
+def _cash_flow_entry_label(e: dict[str, Any]) -> str:
+    """
+    お金の出入りの1件がいつの出来事かを示す見出し（§7.5・§8.2、サイクル4.2c）。
+
+    CashFlowEntryが既に持つround_num/vote_num/turn/phaseから組む（engine側に
+    新しい項目は足さない）。phase→日本語の対応はここに1か所だけ置く
+    （CLAUDE.md落とし穴④）。
+    """
+    rn = e["round_num"]
+    vn = e.get("vote_num")
+    turn = e.get("turn")
+    phase = e["phase"]
+    if phase == "setup":
+        return f"R{rn} 開始前"
+    if phase == "open":
+        return f"R{rn} 参加費"
+    if phase == "negotiation":
+        return f"R{rn}V{vn} {turn}巡目"
+    if phase == "settlement":
+        return f"R{rn}V{vn} 精算"
+    if phase == "round_settlement":
+        return f"R{rn} ラウンドの精算"
+    if phase == "finance":
+        return f"R{rn} 利息"
+    raise AssertionError(f"unknown cash flow entry phase: {phase!r}")  # pragma: no cover
+
+
 def _render_cash_flow_entry_line(e: dict[str, Any]) -> str:
     """
     お金の出入りの1件を1行にする（§7.5・§8.2）。「入金」「出金」で書く
     （「収入」ではない——借りたお金を「収入」と書くと稼いだように読めるため、
-    人間の指示）。借金の増減は別に「借金 +/-」で書く。
+    人間の指示）。借金の増減は別に「借金 +/-」で書く。「いつ」は
+    `_cash_flow_entry_label`が見出しとして出すので、本文には書かない
+    （entry_feeはphase="open"を他のkindと共有しないため、ここで「参加費:」を
+    重ねて書かない。他のkindは見出しが場面名だけなので、本文の名称は残す）。
     """
     kind = e["kind"]
     if kind == "initial_loan":
         return f"開始前の借入: 入金 {yen(e['cash_delta'])}（開始前の借金 {_signed_yen(e['debt_delta'])}）"
     if kind == "entry_fee":
-        return f"参加費: 出金 {yen(e['amount'])}（うち借入 {yen(e['borrowed'])}）"
+        return f"出金 {yen(e['amount'])}（うち借入 {yen(e['borrowed'])}）"
     if kind == "extension_fee":
         return f"延長料: 出金 {yen(e['amount'])}（うち借入 {yen(e['borrowed'])}）"
     if kind == "transfer_out":
@@ -776,7 +833,7 @@ def _render_cash_flow_block(visible_state: dict[str, Any]) -> list[str]:
         header = "R0（開始前）" if rn == 0 else f"R{rn}"
         lines.append(f"  {_render_cash_flow_totals_line(header, r['totals'])}")
         for e in r["entries"]:
-            lines.append(f"    [{header}] {_render_cash_flow_entry_line(e)}")
+            lines.append(f"    [{_cash_flow_entry_label(e)}] {_render_cash_flow_entry_line(e)}")
     lines.append(f"  {_render_cash_flow_totals_line('合計（試合の最初から）', cash_flow['totals'])}")
     return lines
 

@@ -462,8 +462,16 @@ class Game:
         精算（投票・ラウンド）で生じたお金の動きを記録する
         （settle_vote/settle_round の戻り値から。settle_vote/settle_round自体
         には一切書き込まない——判定・配当のロジックと記録を分離する）。
+
+        同じ精算の中では、支払い・受け取りの原因になった動き（延長料など）と
+        契約の支払い・受け取りを先に記録し、「この精算での借入」
+        （SETTLEMENT_BORROWING）は最後に記録する（§7.5、サイクル4.2c A-4。
+        文面側はこの記録順をそのまま表示するため、原因より前に借入の行が
+        出ないようにする）。記録の合計＝現金・借金の照合には順序は関係しない。
         """
-        for mv in movements:
+        borrowing_movements = [mv for mv in movements if mv.kind == LedgerEntryKind.SETTLEMENT_BORROWING]
+        other_movements = [mv for mv in movements if mv.kind != LedgerEntryKind.SETTLEMENT_BORROWING]
+        for mv in other_movements:
             self._record_cash_flow(mv.player_id, CashFlowEntry(
                 round_num=round_num, vote_num=vote_num, phase=phase, kind=mv.kind,
                 amount=mv.amount, cash_delta=mv.cash_delta, debt_delta=mv.debt_delta,
@@ -487,6 +495,12 @@ class Game:
                 promised=item.promised, paid=item.paid,
                 contract_id=item.contract_id, contract_seq=item.contract_seq,
                 obligation_id=item.obligation_id, ob_type=item.ob_type, settlement_scope=scope,
+            ))
+        for mv in borrowing_movements:
+            self._record_cash_flow(mv.player_id, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, phase=phase, kind=mv.kind,
+                amount=mv.amount, cash_delta=mv.cash_delta, debt_delta=mv.debt_delta,
+                debt_kind="post" if mv.debt_delta else None, borrowed=mv.borrowed,
             ))
 
     def _update_obligation_outcomes(self, outcomes: list[ObligationOutcome]) -> None:

@@ -251,7 +251,7 @@ class LLMAgent(PlayerAgent):
             is_round_end=is_round_end, memory=self._memory or None,
         )
         text, _usage = self._call(
-            self._system_prompt, turn_prompt.text, max_tokens=1200, phase="reflect",
+            self._system_prompt, turn_prompt.text, max_tokens=DEFAULT_MAX_TOKENS, phase="reflect",
             round_num=round_num, vote_num=vote_num,
             messages_omitted=turn_prompt.omitted_messages,
         )
@@ -272,7 +272,7 @@ class LLMAgent(PlayerAgent):
             self.config, post_game_context, memory=self._memory or None,
         )
         text, _usage = self._call(
-            self._system_prompt, prompt, max_tokens=1200, phase="post_game",
+            self._system_prompt, prompt, max_tokens=DEFAULT_MAX_TOKENS, phase="post_game",
             round_num=self.config.num_rounds, vote_num=None,
         )
         return parse_post_game_reflection(text, max_chars=400)

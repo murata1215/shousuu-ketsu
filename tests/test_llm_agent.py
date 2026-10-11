@@ -258,6 +258,44 @@ def test_post_game_reflect_logs_none_vote_num(tmp_path):
     assert entry["vote_num"] is None
 
 
+# --- A-5: 振り返り・試合後振り返りのmax_tokensが交渉・投票と同じDEFAULT_MAX_TOKENS ---
+
+def test_reflect_and_post_game_reflect_use_default_max_tokens(tmp_path):
+    """
+    A-5（サイクル4.2c）: メモの上限を1,000字に広げたため、振り返り
+    （`reflect`）・試合後振り返り（`post_game_reflect`）のmax_tokensが
+    小さいと、日本語1,000字とJSONの包みで出力が切れ、メモが読み取れずに
+    更新されない恐れがある。交渉・投票（negotiate/commit）と同じ
+    DEFAULT_MAX_TOKENSを使うことを固定する。
+    """
+    from llm.constants import DEFAULT_MAX_TOKENS
+
+    text_reflect = json.dumps({"memory": "m"})
+    agent, adapter, _ = _make_agent(texts=[text_reflect], tmp_path=tmp_path)
+    agent.reflect(_dummy_player_state(), 1, 1, _dummy_visible_state(), is_round_end=False)
+    assert adapter.calls[-1]["max_tokens"] == DEFAULT_MAX_TOKENS
+
+    text_post_game = json.dumps({"emotion": "楽", "comment": "良い試合だった"})
+    agent2, adapter2, _ = _make_agent(texts=[text_post_game], tmp_path=tmp_path)
+    context = {
+        "own_rank": 1, "own_rank_tied": False, "final_assets": 6_000_000,
+        "round_results": [], "all_final_ranks": [], "all_final_assets": {},
+    }
+    agent2.post_game_reflect(context)
+    assert adapter2.calls[-1]["max_tokens"] == DEFAULT_MAX_TOKENS
+
+    # 交渉・投票も同じ値であること（既存のDEFAULT_MAX_TOKENS採用と揃っていることの確認）
+    text_pass = _pass_text()
+    agent3, adapter3, _ = _make_agent(texts=[text_pass], tmp_path=tmp_path)
+    agent3.negotiate(_dummy_player_state(), 1, 1, 1, _dummy_visible_state())
+    assert adapter3.calls[-1]["max_tokens"] == DEFAULT_MAX_TOKENS
+
+    text_vote = _vote_text()
+    agent4, adapter4, _ = _make_agent(texts=[text_vote], tmp_path=tmp_path)
+    agent4.commit(_dummy_player_state(), 1, 1, _dummy_visible_state())
+    assert adapter4.calls[-1]["max_tokens"] == DEFAULT_MAX_TOKENS
+
+
 # --- DevRelay席のsystem promptに匿名化行が重複しないこと ---
 
 def test_devrelay_seat_system_prompt_excludes_anonymization_line(tmp_path):
