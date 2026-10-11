@@ -224,6 +224,22 @@ def test_m1_request_disables_thinking(monkeypatch):
     assert fake_messages.calls[0]["thinking"] == {"type": "disabled"}
 
 
+def test_h1_request_disables_thinking(monkeypatch):
+    """
+    H1（claude-opus-5）もM1と同じ理由でextra_params={"thinking": {"type":
+    "disabled"}}を持つ（サイクル4.2d、§11.3・§11.9。DevRelay経由のOpus席の
+    時間切れを受けてAPI直結に替えた）。
+    """
+    fake_messages = _FakeMessagesEndpoint(side_effects=[_FakeResponse("hello")])
+    model = get_model("H1")
+    adapter = AnthropicAdapter(model)
+    monkeypatch.setattr(adapter, "_get_client", lambda: _FakeAnthropicClient(fake_messages))
+
+    adapter.complete(system="sys", messages=[{"role": "user", "content": "hi"}], max_tokens=100)
+
+    assert fake_messages.calls[0]["thinking"] == {"type": "disabled"}
+
+
 def test_l1_request_has_no_thinking_param(monkeypatch):
     """L1（Haiku 4.5）はextra_paramsを持たないため、thinkingキーワード自体を送らない"""
     fake_messages = _FakeMessagesEndpoint(side_effects=[_FakeResponse("hello")])

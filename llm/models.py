@@ -289,14 +289,21 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         adapter_type="anthropic",
         input_price=5.0, output_price=25.0,  # roster_v1_0.md §3 (2026-08-09時点) 要再確認
         # doc/llm_api_pricing.md(2026-08-16, 二次資料): $5.00/$25.00, cached $0.50 一致
-        # （input/output）。cached_input_price は未設定のまま（見積が保守側=高めに振れるだけ）。
-        # Cycle 6監査では数値を変更しない。
+        # （input/output）。Cycle 6監査では数値を変更しない。
         env_key="CLAUDE_API_KEY", base_url=None,
         supports_temperature=False,
+        cached_input_price=0.50,  # サイクル4.2d: Anthropic公式料金表2026-10-11確認
+        # （入力5ドル・出力25ドル・キャッシュ読み0.50ドル）。未設定のままだと
+        # キャッシュ読みを入力と同じ単価で数えてしまう（M1と同じ理由、§11.9）。
         # Structured Outputs + thinking disabled のPhase 2試験では visible JSON を優先する。
         phase2_max_tokens=400,
         # 初回Structured Outputs schema compilationが通常60秒を超える場合だけ待機する。
         phase2_timeout_seconds=300,
+        # サイクル4.2d: DevRelay経由のOpus席（DR_OPUS）が交渉の手番の18%を
+        # 時間切れで失ったため、APIで直接呼ぶ席に替えた（§11.3、§12.10）。
+        # 考える機能を止める（M1と同じ理由。止めないと考える分が出力上限を
+        # 使い切り、本文が空になることがある）。
+        extra_params={"thinking": {"type": "disabled"}},
         tier="H",
     ),
     "H2": ModelInfo(
