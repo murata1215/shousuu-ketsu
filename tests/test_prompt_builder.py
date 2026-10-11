@@ -125,6 +125,7 @@ def _post_game_context(game, result, pid: str) -> dict:
         "round_results": round_results,
         "all_final_ranks": all_final_ranks,
         "all_final_assets": all_final_assets,
+        "my_cash_flow": game._cash_flow_view(pid),
     }
 
 
@@ -333,7 +334,7 @@ def test_contract_fully_hidden_from_non_party(fixture_game):
     text03 = build_negotiation_prompt(_ps("P03"), 1, 1, 3, vs03, config).text
     assert "300,000円" not in text03
     assert "type_a_payment" not in text03
-    contract_id = snapshots["P01"][(1, 1, 3)]["my_contracts"][0]["contract_id"]
+    contract_id = snapshots["P01"][(1, 1, 3)]["my_contract_status"][0]["contract_id"]
     assert contract_id not in text03
 
 
@@ -413,7 +414,7 @@ def test_prompt_coverage_headings_and_representative_values_appear(fixture_game)
     assert "開始前の借入額（全員公開）" in text
     for pid in vs["initial_loans"]:
         assert pid in text
-    assert vs["my_contracts"][0]["contract_id"] in text
+    assert vs["my_contract_status"][0]["contract_id"] in text
 
 
 # --- post_game_contextの横断テスト ---

@@ -287,8 +287,10 @@ PROMPT_COVERAGE: dict[str, str] = {
     "round_vote_results": "## このラウンドの投票結果（これまで）",
     "round_results": "## これまでのラウンドの結果",
     "round_contract_counts": "## このラウンドで成立した契約の本数（巡ごと）",
-    "my_contracts": "## あなたが当事者の契約（成立済み）",
+    "my_cash_flow": "## あなたのお金の出入り（本人のみ）",
+    "my_contract_status": "## あなたが当事者の契約",
     "contracts_pending": "## 署名待ちの契約提案",
+    "my_expired_proposals": "## 失効した契約提案（署名がそろわなかったもの）",
     "messages": "## この投票の会話",
 }
 
@@ -308,6 +310,7 @@ POST_GAME_COVERAGE: dict[str, str] = {
     "round_results": "## これまでのラウンドの結果",
     "all_final_ranks": "## 全員の最終順位と最終資産",
     "all_final_assets": "## 全員の最終順位と最終資産",
+    "my_cash_flow": "## あなたのお金の出入り（本人のみ）",
 }
 
 
@@ -620,12 +623,59 @@ def _obligation_fact_sentence(ob: dict[str, Any], *, is_mine: bool, config: Game
     return f"{cond_text}、{subject} {target}へ{amount_text}支払わなければならない"
 
 
-def _render_my_contracts_block(
+def _obligation_status_sentence(ob: dict[str, Any], *, is_mine: bool, config: GameConfig) -> str:
+    """
+    義務1件を事実だけの文にする（助言は書かない。§7.5・§9）。サイクル4.2cで
+    統合。
+
+    statusがpending（これから）なら、既存の_obligation_fact_sentence
+    （「〜しなければならない」）に「（これから）」を足すだけ（既存の
+    部分文字列一致テストと両立する）。それ以外は、済んだこと・型Bを
+    守ったこと・条件が不成立だったこと・失効したことを、動いた額つきで
+    書く。「〜しなければならない」はこれからの義務だけにする（§7.5）。
+    """
+    status = ob.get("status", "pending")
+    if status == "pending":
+        return f"{_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}（これから）"
+
+    rn, vn = ob["round_num"], ob.get("vote_num")
+    label = f"R{rn}V{vn}" if vn is not None else f"R{rn}"
+    subject = "あなたは" if is_mine else f"{ob['obligor']}は"
+    target = ob["counterparty"] if is_mine else "あなた"
+
+    if status in ("paid", "type_b_violated"):
+        promised = yen(ob.get("promised") or 0)
+        paid = yen(ob.get("paid") or 0)
+        if status == "type_b_violated":
+            return (
+                f"{label}: {subject} 型Bに違反した"
+                f"（違約金、約束{promised} / 実際に払われた額{paid}、{target}へ）"
+            )
+        return f"{label}: {subject} {target}へ済み（約束{promised} / 実際に払われた額{paid}）"
+
+    if status == "type_b_kept":
+        vote = (ob.get("details") or {}).get("vote", "?")
+        return f"{label}: {subject} {vote}へ投票した（型Bを守った）"
+
+    if status == "condition_unmet":
+        return f"{label}: {subject}が約束した条件は成立しなかった"
+
+    # expired
+    return f"{label}: {subject}の義務は失効した"
+
+
+def _render_my_contract_status_block(
     visible_state: dict[str, Any], player_id: str, config: GameConfig,
 ) -> list[str]:
-    """あなたが当事者の契約（成立済み。§9: 助言は書かない）"""
-    contracts = visible_state.get("my_contracts") or []
-    lines = ["\n## あなたが当事者の契約（成立済み）"]
+    """
+    あなたが当事者の契約（§7.5・§9: 助言は書かない。義務ごとに状態を示す）。
+
+    渡す契約の範囲はengine側（Game._contract_status_view）が決める
+    （現在のラウンドで成立した契約と、これからの義務が残っている契約だけ。
+    前のラウンドまでに全義務が済んだ契約は示されない、§11.8 #10）。
+    """
+    contracts = visible_state.get("my_contract_status") or []
+    lines = ["\n## あなたが当事者の契約"]
     if not contracts:
         lines.append("  なし")
         return lines
@@ -633,7 +683,101 @@ def _render_my_contracts_block(
         lines.append(f"  契約{c['contract_id']}（成立順{c['contract_seq']}、当事者: {', '.join(c['parties'])}）")
         for ob in c.get("obligations", []):
             is_mine = ob["obligor"] == player_id
+            lines.append(f"    - {_obligation_status_sentence(ob, is_mine=is_mine, config=config)}")
+    return lines
+
+
+def _render_expired_proposals_block(
+    visible_state: dict[str, Any], player_id: str, config: GameConfig,
+) -> list[str]:
+    """失効した契約提案（署名がそろわずに失効したもの。§8.2・§11.8 #15）"""
+    expired = visible_state.get("my_expired_proposals") or []
+    lines = ["\n## 失効した契約提案（署名がそろわなかったもの）"]
+    if not expired:
+        lines.append("  なし")
+        return lines
+    for c in expired:
+        unsigned = [p for p in c["parties"] if p not in c["signed_by"]]
+        lines.append(
+            f"  契約{c['contract_id']}（R{c['round_created']}V{c['vote_created']}提案、"
+            f"提案者: {c['proposer']}、当事者: {', '.join(c['parties'])}、"
+            f"未署名のまま失効: {', '.join(unsigned) or 'なし'}）",
+        )
+        for ob in c.get("obligations", []):
+            is_mine = ob["obligor"] == player_id
             lines.append(f"    - {_obligation_fact_sentence(ob, is_mine=is_mine, config=config)}")
+    return lines
+
+
+def _signed_yen(amount: int) -> str:
+    """符号つきの金額表記（例: +400,000円 / -60,000円）。借金の増減用"""
+    return f"+{yen(amount)}" if amount >= 0 else f"-{yen(-amount)}"
+
+
+def _render_cash_flow_entry_line(e: dict[str, Any]) -> str:
+    """
+    お金の出入りの1件を1行にする（§7.5・§8.2）。「入金」「出金」で書く
+    （「収入」ではない——借りたお金を「収入」と書くと稼いだように読めるため、
+    人間の指示）。借金の増減は別に「借金 +/-」で書く。
+    """
+    kind = e["kind"]
+    if kind == "initial_loan":
+        return f"開始前の借入: 入金 {yen(e['cash_delta'])}（開始前の借金 {_signed_yen(e['debt_delta'])}）"
+    if kind == "entry_fee":
+        return f"参加費: 出金 {yen(e['amount'])}（うち借入 {yen(e['borrowed'])}）"
+    if kind == "extension_fee":
+        return f"延長料: 出金 {yen(e['amount'])}（うち借入 {yen(e['borrowed'])}）"
+    if kind == "transfer_out":
+        return f"{e['counterparty']}へ送金: 出金 {yen(e['amount'])}"
+    if kind == "transfer_in":
+        return f"{e['counterparty']}から送金: 入金 {yen(e['amount'])}"
+    if kind == "repayment":
+        return f"返済: 出金 {yen(e['amount'])}（開始後の借金 {_signed_yen(e['debt_delta'])}）"
+    if kind == "contract_payment_paid":
+        return (
+            f"契約{e['contract_id']}の支払い を {e['counterparty']}へ: 出金 {yen(e['paid'])}"
+            f"（約束 {yen(e['promised'])} / 実際 {yen(e['paid'])}）"
+        )
+    if kind == "contract_payment_received":
+        return (
+            f"契約{e['contract_id']}の受け取り を {e['counterparty']}から: 入金 {yen(e['paid'])}"
+            f"（約束 {yen(e['promised'])} / 実際 {yen(e['paid'])}）"
+        )
+    if kind == "settlement_borrowing":
+        return f"この精算での借入: 入金 {yen(e['amount'])}（開始後の借金 {_signed_yen(e['debt_delta'])}）"
+    if kind == "pot_payout":
+        return f"山の受け取り: 入金 {yen(e['amount'])}"
+    if kind == "interest":
+        debt_label = "開始前の借金" if e["debt_kind"] == "pre" else "開始後の借金"
+        return f"{debt_label}の利息: 借金 {_signed_yen(e['debt_delta'])}"
+    raise AssertionError(f"unknown ledger entry kind: {kind!r}")  # pragma: no cover
+
+
+def _render_cash_flow_totals_line(prefix: str, totals: dict[str, int]) -> str:
+    return (
+        f"{prefix}（入金 {yen(totals['cash_in'])} / 出金 {yen(totals['cash_out'])} / "
+        f"借金 {_signed_yen(totals['debt_delta'])}）"
+    )
+
+
+def _render_cash_flow_block(visible_state: dict[str, Any]) -> list[str]:
+    """
+    あなたのお金の出入り（本人のみ。§7.5・§8.2）。ラウンドごとにまとめ、
+    1件を1行で書く。試合の最初からの全部を持つ（一度渡した記録は渡し続ける）。
+    """
+    cash_flow = visible_state.get("my_cash_flow")
+    lines = ["\n## あなたのお金の出入り（本人のみ）"]
+    rounds = (cash_flow or {}).get("rounds") or []
+    if not rounds:
+        lines.append("  まだありません")
+        return lines
+    for r in rounds:
+        rn = r["round_num"]
+        header = "R0（開始前）" if rn == 0 else f"R{rn}"
+        lines.append(f"  {_render_cash_flow_totals_line(header, r['totals'])}")
+        for e in r["entries"]:
+            lines.append(f"    [{header}] {_render_cash_flow_entry_line(e)}")
+    lines.append(f"  {_render_cash_flow_totals_line('合計（試合の最初から）', cash_flow['totals'])}")
     return lines
 
 
@@ -730,13 +874,15 @@ def _render_state_body(
         visible_state, config, is_round_end=is_round_end,
         is_final_round=visible_state["round_num"] == config.num_rounds,
     ))
+    lines.extend(_render_cash_flow_block(visible_state))
     lines.extend(_render_initial_loans_block(visible_state))
     lines.extend(_render_public_ranks_history_block(visible_state, config))
     lines.extend(_render_round_vote_results_block(visible_state))
     lines.extend(_render_round_results_block(visible_state))
     lines.extend(_render_round_contract_counts_block(visible_state))
-    lines.extend(_render_my_contracts_block(visible_state, player_id, config))
+    lines.extend(_render_my_contract_status_block(visible_state, player_id, config))
     lines.extend(_render_contracts_pending_block(visible_state, player_id, config))
+    lines.extend(_render_expired_proposals_block(visible_state, player_id, config))
     lines.extend(_render_messages_block(visible_state, omit=message_omit))
     return lines
 
@@ -925,6 +1071,7 @@ def build_post_game_reflection_prompt(
     lines.extend(_render_memory_block(memory))
     lines.extend(_render_round_results_block(post_game_context))
     lines.extend(_render_all_final_ranks_and_assets_block(post_game_context))
+    lines.extend(_render_cash_flow_block(post_game_context))
     lines.append(
         "\nゲームは終わりました。この結果は変わりません。"
         f"全{config.num_rounds}ラウンドを振り返り、自然文で自由に語ってください"

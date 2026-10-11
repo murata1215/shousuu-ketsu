@@ -22,15 +22,16 @@ dangou-card `engine/game.py`（B分類）の並列化3段構えパターン
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from engine.autocommit import decide_auto_vote
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.finance import execute_finance
 from engine.models import (
-    Action, BroadcastAction, Contract, ContractProposeAction, ContractSignAction,
-    ContractStatus, DmAction, GameResult, PassAction, PlayerState,
+    Action, BroadcastAction, CashFlowEntry, CashMovement, Contract, ContractProposeAction,
+    ContractSignAction, ContractStatus, DmAction, GameResult, LedgerEntryKind, Obligation,
+    ObligationOutcome, ObligationPayment, ObligationStatus, PassAction, PlayerState,
     RepayAction, RoundOutcome, TransferAction, Vote, VoteOutcome,
 )
 from engine.negotiation import PlayerAgent
@@ -40,6 +41,28 @@ from engine import actions as action_ops
 from engine import contracts as contract_ops
 from engine import player as player_ops
 from engine import round as round_ops
+
+_CASH_FLOW_TOTAL_KEYS = ("cash_in", "cash_out", "cash_delta", "debt_up", "debt_down", "debt_delta", "borrowed")
+
+
+def _cash_flow_totals(entries: list[CashFlowEntry]) -> dict[str, int]:
+    """お金の出入りの記録の小計・合計を作る（§7.5、サイクル4.2c新設）。
+    ラウンドごとの小計と試合全体の合計の両方で同じ関数を使う
+    （CLAUDE.md落とし穴④: 同じ集計を複数箇所に書かない）"""
+    totals = {k: 0 for k in _CASH_FLOW_TOTAL_KEYS}
+    for e in entries:
+        if e.cash_delta > 0:
+            totals["cash_in"] += e.cash_delta
+        elif e.cash_delta < 0:
+            totals["cash_out"] += -e.cash_delta
+        totals["cash_delta"] += e.cash_delta
+        if e.debt_delta > 0:
+            totals["debt_up"] += e.debt_delta
+        elif e.debt_delta < 0:
+            totals["debt_down"] += -e.debt_delta
+        totals["debt_delta"] += e.debt_delta
+        totals["borrowed"] += e.borrowed
+    return totals
 
 
 class Game:
@@ -151,6 +174,15 @@ class Game:
         self._public_ranks_history: dict[int, dict[str, int]] = {}
         self.post_game_reflections: dict[str, dict[str, Any]] = {}
         """player_id -> post_game_reflect()の戻り値（§9.4）"""
+
+        self._cash_flow: dict[str, list[CashFlowEntry]] = {}
+        """player_id -> お金の出入りの記録（§7.5・§8.2、サイクル4.2c新設）。
+        試合の最初から全部持ち、ラウンドでリセットしない（試合全体の状態）"""
+
+        self._obligation_outcomes: dict[str, ObligationOutcome] = {}
+        """obligation_id -> 義務ごとの状態の評価結果（§7.5、サイクル4.2c新設）。
+        対象の精算が終わった義務だけが入る。無い=「これから」（PENDING）。
+        試合全体の状態（ラウンドでリセットしない）"""
 
     # ------------------------------------------------------------------
     # メインループ
@@ -343,6 +375,10 @@ class Game:
         最終資産（all_final_ranks・all_final_assets）も渡す。全員の最終順位と
         最終資産は、最終ラウンドの終了後に全員へ公開される情報であり
         （ルール全文に足した行(b)参照）、本人のものだけに絞る理由がない。
+
+        サイクル4.2c: 自分のお金の出入りの記録（my_cash_flow）も渡す
+        （§9.4「試合後の振り返りには…自分のお金の出入りの記録を渡す」。
+        最終ラウンドの精算と利息を含む、受け入れ#62）。
         """
         ranks = player_ops.assets_ranking(self.players.values())
         pending = sorted(self.agents)
@@ -366,6 +402,7 @@ class Game:
                 "round_results": round_results,
                 "all_final_ranks": all_final_ranks,
                 "all_final_assets": all_final_assets,
+                "my_cash_flow": self._cash_flow_view(pid),
             }
             try:
                 return self.agents[pid].post_game_reflect(context)
@@ -400,6 +437,62 @@ class Game:
             raise AssertionError(
                 f"R{round_num}V{vote_num} {phase}: cash went negative for {sorted(negative)}",
             )
+
+    # ------------------------------------------------------------------
+    # お金の出入りの記録（§7.5・§8.2、サイクル4.2c新設）
+    # ------------------------------------------------------------------
+
+    def _record_cash_flow(self, player_id: str, entry: CashFlowEntry) -> None:
+        """
+        お金の出入りの記録に1件足す唯一の書き込み口（CLAUDE.md落とし穴④:
+        同じ処理を複数箇所に書くと修正漏れが起きるため、ここに集める）。
+        """
+        assert entry.amount >= 0, f"amount must be >= 0: {entry}"
+        assert entry.debt_delta == 0 or entry.debt_kind is not None, (
+            f"debt_delta != 0 なら debt_kind が必要: {entry}"
+        )
+        self._cash_flow.setdefault(player_id, []).append(entry)
+
+    def _record_settlement_cash_flow(
+        self, *, round_num: int, vote_num: int | None, phase: str,
+        movements: list[CashMovement], payments: list[ObligationPayment],
+        scope: Literal["vote", "round"],
+    ) -> None:
+        """
+        精算（投票・ラウンド）で生じたお金の動きを記録する
+        （settle_vote/settle_round の戻り値から。settle_vote/settle_round自体
+        には一切書き込まない——判定・配当のロジックと記録を分離する）。
+        """
+        for mv in movements:
+            self._record_cash_flow(mv.player_id, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, phase=phase, kind=mv.kind,
+                amount=mv.amount, cash_delta=mv.cash_delta, debt_delta=mv.debt_delta,
+                debt_kind="post" if mv.debt_delta else None, borrowed=mv.borrowed,
+            ))
+        for item in payments:
+            if item.paid <= 0:
+                continue
+            self._record_cash_flow(item.obligor, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, phase=phase,
+                kind=LedgerEntryKind.CONTRACT_PAYMENT_PAID, counterparty=item.counterparty,
+                amount=item.paid, cash_delta=-item.paid, debt_delta=0,
+                promised=item.promised, paid=item.paid,
+                contract_id=item.contract_id, contract_seq=item.contract_seq,
+                obligation_id=item.obligation_id, ob_type=item.ob_type, settlement_scope=scope,
+            ))
+            self._record_cash_flow(item.counterparty, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, phase=phase,
+                kind=LedgerEntryKind.CONTRACT_PAYMENT_RECEIVED, counterparty=item.obligor,
+                amount=item.paid, cash_delta=item.paid, debt_delta=0,
+                promised=item.promised, paid=item.paid,
+                contract_id=item.contract_id, contract_seq=item.contract_seq,
+                obligation_id=item.obligation_id, ob_type=item.ob_type, settlement_scope=scope,
+            ))
+
+    def _update_obligation_outcomes(self, outcomes: list[ObligationOutcome]) -> None:
+        """義務ごとの状態（§7.5）を精算の結果で更新する唯一の書き込み口"""
+        for outcome in outcomes:
+            self._obligation_outcomes[outcome.obligation_id] = outcome
 
     # ------------------------------------------------------------------
     # セットアップ（§3.1: 借入額の選択）
@@ -440,6 +533,10 @@ class Game:
 
         for pid, loan in loans.items():
             self.players[pid] = player_ops.create_player(pid, loan)
+            self._record_cash_flow(pid, CashFlowEntry(
+                round_num=0, phase="setup", kind=LedgerEntryKind.INITIAL_LOAN,
+                amount=loan, cash_delta=loan, debt_delta=loan, debt_kind="pre",
+            ))
 
         self.logger.log(
             "LOAN_REVEALED", 0, "setup", visibility="public",
@@ -463,6 +560,11 @@ class Game:
                 "ENTRY_FEE_COLLECTED", round_num, "open", visibility="self",
                 data={"player_id": pid, "paid": paid, "borrowed": borrowed},
             )
+            self._record_cash_flow(pid, CashFlowEntry(
+                round_num=round_num, phase="open", kind=LedgerEntryKind.ENTRY_FEE,
+                amount=paid, cash_delta=-(paid - borrowed), debt_delta=borrowed,
+                debt_kind="post" if borrowed else None, borrowed=borrowed,
+            ))
 
         pot = round_ops.initial_pot(self.config, carryover_in)
         self.logger.log(
@@ -671,6 +773,16 @@ class Game:
                 "TRANSFER", round_num, "negotiation", vote_num=vote_num, visibility="parties",
                 data={"player_id": pid, "to": action.to, "amount": action.amount, "turn": turn},
             )
+            self._record_cash_flow(pid, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, turn=turn, phase="negotiation",
+                kind=LedgerEntryKind.TRANSFER_OUT, counterparty=action.to,
+                amount=action.amount, cash_delta=-action.amount, debt_delta=0,
+            ))
+            self._record_cash_flow(action.to, CashFlowEntry(
+                round_num=round_num, vote_num=vote_num, turn=turn, phase="negotiation",
+                kind=LedgerEntryKind.TRANSFER_IN, counterparty=pid,
+                amount=action.amount, cash_delta=action.amount, debt_delta=0,
+            ))
             return 0
 
         if isinstance(action, RepayAction):
@@ -685,6 +797,12 @@ class Game:
                     "from_pre": old_p.debt_pre - new_p.debt_pre,
                 },
             )
+            if actual > 0:
+                self._record_cash_flow(pid, CashFlowEntry(
+                    round_num=round_num, vote_num=vote_num, turn=turn, phase="negotiation",
+                    kind=LedgerEntryKind.REPAYMENT,
+                    amount=actual, cash_delta=-actual, debt_delta=-actual, debt_kind="post",
+                ))
             return 0
 
         if isinstance(action, ContractProposeAction):
@@ -825,6 +943,12 @@ class Game:
                 data={"pot": self._pot, "reason": "extension_fee"},
             )
 
+        self._record_settlement_cash_flow(
+            round_num=round_num, vote_num=vote_num, phase="settlement",
+            movements=result.movements, payments=result.report.payments, scope="vote",
+        )
+        self._update_obligation_outcomes(result.report.obligation_outcomes)
+
         violator_ids = sorted({obligor for obligor, _ in result.report.violations})
         return result.outcome, violator_ids, result.report.shortfall_ids
 
@@ -851,6 +975,19 @@ class Game:
         self.total_destroyed_pot += result.outcome.destroyed_pot
         self.total_forfeited_remainder += result.outcome.forfeited_remainder
         self._last_round_outcome = result.outcome
+
+        for winner_pid in result.outcome.winner_ids:
+            self._record_cash_flow(winner_pid, CashFlowEntry(
+                round_num=round_num, phase="round_settlement", kind=LedgerEntryKind.POT_PAYOUT,
+                amount=result.outcome.payout_per_winner,
+                cash_delta=result.outcome.payout_per_winner, debt_delta=0,
+            ))
+        self._record_settlement_cash_flow(
+            round_num=round_num, vote_num=None, phase="round_settlement",
+            movements=result.movements, payments=result.report.payments, scope="round",
+        )
+        self._update_obligation_outcomes(result.report.obligation_outcomes)
+
         return result.report.shortfall_ids
 
     # ------------------------------------------------------------------
@@ -867,9 +1004,25 @@ class Game:
         payment_shortfall_ids: set[str],
         round_settlement_shortfall_ids: list[str],
     ) -> None:
-        updated, interest_total = execute_finance(self.players, round_num, self.config, self.logger)
+        updated, interest_total, interest_by_player = execute_finance(
+            self.players, round_num, self.config, self.logger,
+        )
         self.players = updated
         self.total_interest += interest_total
+
+        for pid, (interest_pre, interest_post) in interest_by_player.items():
+            # 開始前・開始後で利率が違うため、debt_kindごとに別の記録にする
+            # （§3.3。CashFlowEntryは1件で1つのdebt_kindしか持たない）。
+            if interest_pre > 0:
+                self._record_cash_flow(pid, CashFlowEntry(
+                    round_num=round_num, phase="finance", kind=LedgerEntryKind.INTEREST,
+                    amount=interest_pre, cash_delta=0, debt_delta=interest_pre, debt_kind="pre",
+                ))
+            if interest_post > 0:
+                self._record_cash_flow(pid, CashFlowEntry(
+                    round_num=round_num, phase="finance", kind=LedgerEntryKind.INTEREST,
+                    amount=interest_post, cash_delta=0, debt_delta=interest_post, debt_kind="post",
+                ))
 
         assert self._last_round_outcome is not None
         summary = self._last_round_outcome.model_copy(update={
@@ -965,8 +1118,12 @@ class Game:
                 "details": dict(ob.details),
             }
             for ob in due_vote + due_round
-            if ob.obligor == player_id
+            if ob.obligor == player_id and ob.obligation_id not in self._obligation_outcomes
         ]
+        # 済んだ義務（obligation_idがself._obligation_outcomesにある）はここに
+        # 出さない（§7.5「済んだ義務を、これからの義務として示さない」。
+        # サイクル4.2c）。済んだ義務の額は自分が当事者の契約の表示
+        # （_contract_status_view）とお金の出入りの記録に残る。
         pre_pct = self.config.interest_rate_pre_num / self.config.interest_rate_pre_den * 100
         return {
             "cash": me.cash,
@@ -1025,6 +1182,71 @@ class Game:
             "round_settlement_shortfall_ids": outcome.round_settlement_shortfall_ids,
             "payment_shortfall_ids": outcome.payment_shortfall_ids,
             "votes": [self._vote_result_view(v) for v in outcome.votes],
+        }
+
+    def _cash_flow_view(self, player_id: str) -> dict[str, Any]:
+        """
+        お金の出入りの記録（本人のみ、§7.5・§8.2）。試合の最初からの全部を
+        ラウンドごとにまとめ、ラウンドごとの小計と試合全体の合計を持つ。
+        """
+        entries = self._cash_flow.get(player_id, [])
+        by_round: dict[int, list[CashFlowEntry]] = {}
+        for e in entries:
+            by_round.setdefault(e.round_num, []).append(e)
+        rounds = [
+            {
+                "round_num": rn,
+                "entries": [e.model_dump(mode="json") for e in by_round[rn]],
+                "totals": _cash_flow_totals(by_round[rn]),
+            }
+            for rn in sorted(by_round)
+        ]
+        return {"rounds": rounds, "totals": _cash_flow_totals(entries)}
+
+    def _obligation_status_view(self, ob: Obligation) -> dict[str, Any]:
+        """
+        1つの義務の状態を描く（§7.5）。状態はself._obligation_outcomesから
+        読み出すだけで、ここでは一切判定しない（エンジンの精算結果が唯一の
+        根拠。文面層・ビューアに判定を持ち込まない、サイクル4.2c）。
+        """
+        base = {
+            "obligor": ob.obligor, "counterparty": ob.counterparty,
+            "ob_type": ob.ob_type.value, "round_num": ob.round_num,
+            "vote_num": ob.vote_num, "details": dict(ob.details),
+        }
+        outcome = self._obligation_outcomes.get(ob.obligation_id)
+        if outcome is None:
+            return {
+                **base, "status": ObligationStatus.PENDING.value,
+                "promised": None, "paid": None,
+                "settled_round_num": None, "settled_vote_num": None, "settlement_scope": None,
+            }
+        has_amount = outcome.status in (ObligationStatus.PAID, ObligationStatus.TYPE_B_VIOLATED)
+        return {
+            **base, "status": outcome.status.value,
+            "promised": outcome.promised if has_amount else None,
+            "paid": outcome.paid if has_amount else None,
+            "settled_round_num": outcome.round_num, "settled_vote_num": outcome.vote_num,
+            "settlement_scope": outcome.settlement_scope,
+        }
+
+    def _contract_status_view(self, c: Contract, round_num: int) -> dict[str, Any] | None:
+        """
+        自分が当事者の契約1件の表示（§7.5）。渡す範囲は、現在のラウンドで
+        成立した契約と、これからの義務（PENDING）が残っている契約だけ。
+        前のラウンドまでに全義務が済んだ契約はNoneを返す（その支払いと
+        受け取りはmy_cash_flowに残る、§11.8 #10）。
+        """
+        obligations = [self._obligation_status_view(ob) for ob in c.obligations]
+        established_this_round = c.round_established == round_num
+        has_future = any(o["status"] == ObligationStatus.PENDING.value for o in obligations)
+        if not (established_this_round or has_future):
+            return None
+        return {
+            "contract_id": c.contract_id, "contract_seq": c.contract_seq,
+            "parties": list(c.parties),
+            "round_established": c.round_established, "vote_established": c.vote_established,
+            "obligations": obligations,
         }
 
     def _build_visible_state(
@@ -1104,13 +1326,16 @@ class Game:
                     for ob in c.obligations
                 ]
 
-            state["my_contracts"] = [
-                {
-                    "contract_id": c.contract_id, "contract_seq": c.contract_seq,
-                    "parties": list(c.parties), "obligations": _obligations_view(c),
-                }
-                for c in self.contracts
+            # my_contracts（成立済み・状態なし）はサイクル4.2cでmy_contract_status
+            # に置き換えた（§7.5: 義務ごとに「これから」「済み」等の状態を示す。
+            # 範囲も変わった——前のラウンドまでに全義務が済んだ契約は示さない、
+            # §11.8 #10）。改名して置き換える（旧名を残すと取り違える、
+            # CLAUDE.md落とし穴⑨）。
+            state["my_contract_status"] = [
+                view for c in self.contracts
                 if c.status == ContractStatus.ACTIVE and for_player_id in c.parties
+                for view in [self._contract_status_view(c, round_num)]
+                if view is not None
             ]
             state["contracts_pending"] = [
                 {
@@ -1122,6 +1347,20 @@ class Game:
                 for c in self.contracts
                 if c.status == ContractStatus.PROPOSED and for_player_id in c.parties
             ]
+            # 署名がそろわずに失効した提案（§8.2）。現在のラウンドの分だけ、
+            # その提案の当事者に渡す。
+            state["my_expired_proposals"] = [
+                {
+                    "contract_id": c.contract_id, "proposer": c.proposer,
+                    "parties": list(c.parties), "signed_by": list(c.signed_by),
+                    "round_created": c.round_created, "vote_created": c.vote_created,
+                    "obligations": _obligations_view(c),
+                }
+                for c in self.contracts
+                if c.status == ContractStatus.EXPIRED
+                and c.round_created == round_num
+                and for_player_id in c.parties
+            ]
 
             if for_player_id in self.players:
                 state["my_finance"] = self._build_my_finance(for_player_id, round_num, vote_num)
@@ -1129,5 +1368,6 @@ class Game:
                 state["my_rank"] = {
                     "rank": my_rank.rank, "tied": my_rank.tied, "n_players": my_rank.n_players,
                 }
+                state["my_cash_flow"] = self._cash_flow_view(for_player_id)
 
         return state

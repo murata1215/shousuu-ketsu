@@ -18,7 +18,7 @@ def execute_finance(
     round_num: int,
     config: GameConfig,
     logger: EventLogger,
-) -> tuple[dict[str, PlayerState], int]:
+) -> tuple[dict[str, PlayerState], int, dict[str, tuple[int, int]]]:
     """
     Financeフェイズを実行する（§7 手順5: 利息の計上）
 
@@ -29,15 +29,23 @@ def execute_finance(
         logger: イベントロガー
 
     Returns:
-        (更新されたplayers, このラウンドの利息合計)
+        (更新されたplayers, このラウンドの利息合計,
+         player_id -> (interest_pre, interest_post) の辞書)
+
+        3つめの戻り値はサイクル4.2c新設（§7.5「お金の出入りの記録」用。
+        INTERESTイベントが既に持つ値を、呼び出し側がイベントログを読み返さずに
+        受け取れるようにする。CLAUDE.md落とし穴⑦・⑩: ログに残る値を呼び出し側が
+        別経路で再構築する設計は避け、戻り値から直接渡す）。
     """
     updated = dict(players)
     interest_total = 0
+    interest_by_player: dict[str, tuple[int, int]] = {}
     for pid in sorted(updated):
         p = updated[pid]
         new_p, interest_pre, interest_post = player_ops.apply_interest(p, config)
         updated[pid] = new_p
         interest_total += interest_pre + interest_post
+        interest_by_player[pid] = (interest_pre, interest_post)
         logger.log("INTEREST", round_num, "finance", visibility="self", data={
             "player_id": pid,
             "interest_pre": interest_pre,
@@ -45,4 +53,4 @@ def execute_finance(
             "new_debt_pre": new_p.debt_pre,
             "new_debt_post": new_p.debt_post,
         })
-    return updated, interest_total
+    return updated, interest_total, interest_by_player

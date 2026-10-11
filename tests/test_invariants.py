@@ -92,7 +92,7 @@ def _run_contract_game(seed: int) -> tuple:
     logger = EventLogger()
     game = Game(config=GameConfig.default_12(), agents=agents, seed=seed, logger=logger)
     result = game.run()
-    return result, logger
+    return game, result, logger
 
 
 def test_100_random_games_with_contracts_satisfy_invariants() -> None:
@@ -104,7 +104,7 @@ def test_100_random_games_with_contracts_satisfy_invariants() -> None:
     """
     config = GameConfig.default_12()
     for seed in range(NUM_GAMES):
-        result, logger = _run_contract_game(seed)
+        _game, result, logger = _run_contract_game(seed)
 
         # --- 帳尻: 契約の支払いは当事者間のゼロサム移動なので総額の式は変わらない ---
         expected_total = -(
@@ -156,11 +156,59 @@ def test_100_random_games_with_contracts_satisfy_invariants() -> None:
 
 def test_same_seed_with_contracts_gives_identical_results() -> None:
     """同じシードなら契約の内容・成立・支払いまで含めて結果が完全一致する"""
-    result1, logger1 = _run_contract_game(seed=777)
-    result2, logger2 = _run_contract_game(seed=777)
+    _game1, result1, logger1 = _run_contract_game(seed=777)
+    _game2, result2, logger2 = _run_contract_game(seed=777)
 
     assert result1.final_assets == result2.final_assets
     assert result1.final_ranks == result2.final_ranks
     events1 = [(e.event_type, e.round_num, e.vote_num, e.phase, e.step, e.data) for e in logger1.events]
     events2 = [(e.event_type, e.round_num, e.vote_num, e.phase, e.step, e.data) for e in logger2.events]
     assert events1 == events2
+
+
+def test_100_random_contract_games_cash_flow_ledger_reconciles() -> None:
+    """
+    記録の合計の確認（サイクル4.2c、§7.5・§8.2）: 各プレイヤーの「お金の出入り
+    の記録」の入りと出を合計した額が、現金と借金の変化と1円も狂わないこと。
+
+    借入額（initial_loan）が基準点。試合終了時点の
+    現金 == Σcash_delta、借金合計 == Σdebt_delta、さらに内訳として
+    開始前の借金 == Σ(debt_delta where debt_kind=="pre")、
+    開始後の借金 == Σ(debt_delta where debt_kind=="post") も確認する
+    （debt_kindを必須にした設計の検証）。
+    """
+    for seed in range(NUM_GAMES):
+        game, result, _logger = _run_contract_game(seed)
+        for pid, player in result.final_players.items():
+            entries = game._cash_flow.get(pid, [])
+            assert player.cash == sum(e.cash_delta for e in entries), (seed, pid, "cash")
+            assert player.total_debt == sum(e.debt_delta for e in entries), (seed, pid, "total_debt")
+            assert player.debt_pre == sum(
+                e.debt_delta for e in entries if e.debt_kind == "pre"
+            ), (seed, pid, "debt_pre")
+            assert player.debt_post == sum(
+                e.debt_delta for e in entries if e.debt_kind == "post"
+            ), (seed, pid, "debt_post")
+
+
+def test_100_random_contract_games_have_no_stale_pending_obligations() -> None:
+    """
+    義務ごとの状態の取りはぐれ確認（サイクル4.2c、§7.5）: 試合が最後まで
+    進んだ後、ACTIVEな契約の全義務にObligationOutcomeがある
+    （PENDINGのまま取りこぼされた義務が無い）。
+
+    対象ラウンドの投票・ラウンドの精算は試合完了までに必ず一度は実行される
+    （stop_after_roundを使っていないため）ので、終局時点でPENDINGの
+    ACTIVE義務が残っていればエンジン側の取りこぼしを意味する。
+    """
+    from engine.models import ContractStatus
+
+    for seed in range(NUM_GAMES):
+        game, _result, _logger = _run_contract_game(seed)
+        for contract in game.contracts:
+            if contract.status != ContractStatus.ACTIVE:
+                continue
+            for ob in contract.obligations:
+                assert ob.obligation_id in game._obligation_outcomes, (
+                    seed, contract.contract_id, ob.obligation_id,
+                )

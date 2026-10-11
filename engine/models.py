@@ -425,6 +425,13 @@ class RoundOutcome(BaseModel):
 class ObligationPayment(BaseModel):
     """1つの義務に対する支払いの内訳（§7.3手順6・§7.4手順5、内部処理・ログ用）"""
 
+    obligation_id: str
+    """対象の義務ID（サイクル4.2c追加。お金の出入りの記録・義務ごとの状態
+    （§7.5）が、この支払いをどの義務に結び付けるか一意に特定するために必要。
+    作っているのはengine/settlement.pyの2か所だけ（_collect_vote_due_items・
+    _collect_round_due_items）で、既存のテストもこのフィールドを作っていない
+    ため必須にしても安全）"""
+
     contract_id: str
     contract_seq: int
     ob_index: int
@@ -438,6 +445,161 @@ class ObligationPayment(BaseModel):
 
     paid: int
     """実際に支払われた額（0以上、promised以下）"""
+
+
+class LedgerEntryKind(str, Enum):
+    """お金の出入りの記録の種別（§7.5・§8.2、サイクル4.2c新設）。1件 = 本人の
+    現金か借金が動いた1事象"""
+
+    INITIAL_LOAN = "initial_loan"
+    """§3.1 開始前の借入（現金+／開始前の借金+）"""
+
+    ENTRY_FEE = "entry_fee"
+    """§7.1 参加費"""
+
+    EXTENSION_FEE = "extension_fee"
+    """§7.3手順2 延長料"""
+
+    TRANSFER_OUT = "transfer_out"
+    TRANSFER_IN = "transfer_in"
+
+    REPAYMENT = "repayment"
+    """§3.5 返済（開始後の借金だけに充てる）"""
+
+    CONTRACT_PAYMENT_PAID = "contract_payment_paid"
+    """契約の支払い（型A・型C・型Bの違約金。払う側）"""
+
+    CONTRACT_PAYMENT_RECEIVED = "contract_payment_received"
+    """契約の受け取り（払う側の相手方）"""
+
+    SETTLEMENT_BORROWING = "settlement_borrowing"
+    """§7.3手順7・§7.4手順6 精算（契約の支払い）で生じた借入（精算1回に1件）"""
+
+    POT_PAYOUT = "pot_payout"
+    """§4.5 山の受け取り"""
+
+    INTEREST = "interest"
+    """§3.3 利息"""
+
+
+class CashFlowEntry(BaseModel):
+    """
+    お金の出入りの1件（§7.5・§8.2、本人のみ、サイクル4.2c新設）
+
+    amountは本人目線の額（常に0以上）。cash_delta/debt_deltaは符号つきの
+    実際の増減で、記録の合計の確認（Σcash_delta==現金の変化、
+    Σdebt_delta==借金合計の変化）の唯一の根拠になる。向きはkindが決めるので
+    directionのような重複フィールドは持たない（CLAUDE.md落とし穴④）。
+    """
+
+    round_num: int
+    """0 = 試合開始前（INITIAL_LOANのみ）"""
+
+    vote_num: int | None = None
+    """投票単位の動きだけ（延長料・交渉中の送金・投票の精算の契約支払い）"""
+
+    turn: int | None = None
+    """交渉の巡（送金・返済だけ）"""
+
+    phase: str
+    """engine/models.py::GameEvent.phaseと同じ語彙"""
+
+    kind: LedgerEntryKind
+    counterparty: str | None = None
+    """相手。場が相手（参加費・延長料・山・利息）はNone"""
+
+    amount: int
+    """本人目線の額（0以上）"""
+
+    cash_delta: int
+    """現金の増減（符号つき）"""
+
+    debt_delta: int
+    """借金合計の増減（符号つき）"""
+
+    debt_kind: Literal["pre", "post"] | None = None
+    """debt_delta != 0 のとき必須（開始前/開始後のどちらが動いたか）"""
+
+    borrowed: int = 0
+    """この1件のために新たに発生した開始後の借金の額"""
+
+    promised: int | None = None
+    """契約の支払いだけ（約束した額）"""
+
+    paid: int | None = None
+    """契約の支払いだけ（実際に払われた額）"""
+
+    contract_id: str | None = None
+    contract_seq: int | None = None
+    obligation_id: str | None = None
+    ob_type: ObligationType | None = None
+    settlement_scope: Literal["vote", "round"] | None = None
+
+
+class ObligationStatus(str, Enum):
+    """義務ごとの状態（§7.5、サイクル4.2c新設）。エンジンが精算の結果から
+    決め、文面層は描くだけ（文面の側で推測しない）"""
+
+    PENDING = "pending"
+    """これから（対象の投票・ラウンドがまだ精算されていない）"""
+
+    PAID = "paid"
+    """済み（promised・paidで額を示す。上限で0円になってもpaid）"""
+
+    TYPE_B_KEPT = "type_b_kept"
+    """型Bを守った"""
+
+    TYPE_B_VIOLATED = "type_b_violated"
+    """型Bに違反した（promised=違約金、paid=実際に払われた額）"""
+
+    CONDITION_UNMET = "condition_unmet"
+    """型Cの条件が成立しなかった"""
+
+    EXPIRED = "expired"
+    """義務者が退場／対象の投票が行われなかった（§6.3）"""
+
+
+class ObligationOutcome(BaseModel):
+    """
+    1つの義務が、その義務の対象の精算で「評価された」結果（サイクル4.2c新設、
+    §7.3手順3/4・§7.4手順2/3）
+
+    払いが発生しなかった評価（型Bを守った・条件が成立しなかった・失効）も
+    必ず1件作る。statusにPENDINGは入らない（PENDING=このモデルがまだ
+    作られていないこと、§7.5）。
+    """
+
+    obligation_id: str
+    contract_id: str
+    contract_seq: int
+    ob_index: int
+    obligor: str
+    counterparty: str
+    ob_type: ObligationType
+    round_num: int
+    vote_num: int | None
+    status: ObligationStatus
+    promised: int = 0
+    paid: int = 0
+    settlement_scope: Literal["vote", "round"]
+
+
+class CashMovement(BaseModel):
+    """
+    精算の中で起きた契約以外のお金の動きを、呼び出し側（engine/game.py）へ
+    運ぶ（サイクル4.2c新設、§7.5の記録用）
+
+    延長料（EXTENSION_FEE）と精算での借金確定（SETTLEMENT_BORROWING）だけ。
+    山の受け取りはRoundOutcome.winner_ids/payout_per_winnerから導けるので
+    ここには含めない（同じ事実を2か所に持たない、CLAUDE.md落とし穴④）。
+    """
+
+    player_id: str
+    kind: LedgerEntryKind
+    amount: int
+    cash_delta: int
+    debt_delta: int
+    borrowed: int = 0
 
 
 class ContractSettlementReport(BaseModel):
@@ -454,6 +616,14 @@ class ContractSettlementReport(BaseModel):
 
     shortfall_ids: list[str] = Field(default_factory=list)
     """払いきれなかった者のプレイヤーID"""
+
+    obligation_outcomes: list[ObligationOutcome] = Field(default_factory=list)
+    """
+    この精算で評価された全義務の結果（サイクル4.2c新設）。
+
+    paymentsは支払い対象（payable）になった分だけなので、型Bを守った・
+    型Cの条件が成立しなかった・失効した義務はここにしか現れない。
+    """
 
 
 class GameResult(BaseModel):

@@ -30,7 +30,7 @@ from enum import Enum
 from typing import Any, NamedTuple
 
 from engine.models import (
-    Contract, ContractStatus, Obligation, ObligationType,
+    Contract, ContractStatus, Obligation, ObligationStatus, ObligationType,
     ConditionType, RoundOutcome, VoteOutcome, Vote,
 )
 
@@ -209,6 +209,44 @@ def obligations_due(
     return result
 
 
+def classify_type_b(
+    contracts: list[Contract],
+    votes: dict[str, Vote],
+    round_num: int,
+    vote_num: int,
+) -> list[tuple[Obligation, ObligationStatus]]:
+    """
+    この投票が対象の型B義務を1本ずつ「守った」「破った」「失効した」に
+    分類する（§6.2/§6.3/§7.3手順3、サイクル4.2c: ObligationOutcome用に新設）
+
+    義務者がこの投票に参加していない（退場済み、§6.3「対象の投票の時点で
+    義務者が退場している場合も、義務は失効する」）場合は失効（違約金なし）。
+
+    Args:
+        contracts: 全契約リスト
+        votes: player_id -> Vote（§7.3手順1でRevealされた、この投票に
+            参加した全員分）
+        round_num: 対象ラウンド
+        vote_num: 対象投票番号
+
+    Returns:
+        (義務, 状態) のリスト。状態は TYPE_B_KEPT / TYPE_B_VIOLATED / EXPIRED
+    """
+    results: list[tuple[Obligation, ObligationStatus]] = []
+    for ob in obligations_due(contracts, round_num, vote_num, ObligationType.TYPE_B_VOTE):
+        actual = votes.get(ob.obligor)
+        if actual is None:
+            # 退場済み、またはこの投票自体が行われなかった（§6.3）→ 失効
+            results.append((ob, ObligationStatus.EXPIRED))
+            continue
+        required = ob.details.get("vote")
+        if actual.value != required:
+            results.append((ob, ObligationStatus.TYPE_B_VIOLATED))
+        else:
+            results.append((ob, ObligationStatus.TYPE_B_KEPT))
+    return results
+
+
 def audit_type_b(
     contracts: list[Contract],
     votes: dict[str, Vote],
@@ -219,29 +257,18 @@ def audit_type_b(
     型Bの監査: 指定した投票の型B義務のうち、実際の投票と一致しないものを返す
     （§6.2/§6.3/§7.3手順3）
 
-    義務者がこの投票に参加していない（退場済み、§6.3「対象の投票の時点で
-    義務者が退場している場合も、義務は失効する」）場合は監査をスキップする。
-
-    Args:
-        contracts: 全契約リスト
-        votes: player_id -> Vote（§7.3手順1でRevealされた、この投票に
-            参加した全員分）
-        round_num: 対象ラウンド
-        vote_num: 対象投票番号
+    サイクル4.2c: classify_type_b() の絞り込みに変えた（守った／破った／
+    失効したの判定が1本に集まる、CLAUDE.md過去の落とし穴④）。既存の呼び出し元
+    （engine/settlement.py::_collect_vote_due_itemsは内部でclassify_type_bを
+    直接使うようになったが、本関数自体は後方互換のため残す）。
 
     Returns:
         違反した型B義務のリスト（破った義務1本=違約金100万1本、§6.3）
     """
-    violations: list[Obligation] = []
-    for ob in obligations_due(contracts, round_num, vote_num, ObligationType.TYPE_B_VOTE):
-        actual = votes.get(ob.obligor)
-        if actual is None:
-            # 退場済み、またはこの投票自体が行われなかった（§6.3）→ 失効
-            continue
-        required = ob.details.get("vote")
-        if actual.value != required:
-            violations.append(ob)
-    return violations
+    return [
+        ob for ob, status in classify_type_b(contracts, votes, round_num, vote_num)
+        if status == ObligationStatus.TYPE_B_VIOLATED
+    ]
 
 
 def evaluate_type_c_vote_condition(ob: Obligation, outcome: VoteOutcome) -> bool:

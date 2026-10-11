@@ -12,7 +12,7 @@ v0.3の `tests/test_settlement.py`・`tests/test_settlement_contracts.py` を
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.models import (
-    Contract, ContractStatus, Obligation, ObligationType, PlayerState, Vote,
+    Contract, ContractStatus, Obligation, ObligationStatus, ObligationType, PlayerState, Vote,
 )
 from engine.settlement import settle_round, settle_vote
 
@@ -81,12 +81,17 @@ def test_acceptance_24_type_b_violation_partial_borrow() -> None:
     assert result.report.violations == [("P01", "OB1")]
     payment = result.report.payments[0]
     assert payment.promised == 1_000_000 and payment.paid == 1_000_000
+    assert payment.obligation_id == "OB1"
     assert result.players["P01"].cash == 0
     assert result.players["P01"].debt_post == 700_000
     assert result.players["P02"].cash == players["P02"].cash + 1_000_000
     assert "P01" not in result.report.shortfall_ids
     violation_events = [e for e in logger.events if e.event_type == "TYPE_B_VIOLATION"]
     assert violation_events and "P01" in violation_events[0].data["player_ids"]
+    # サイクル4.2c: 義務ごとの状態（§7.5）がTYPE_B_VIOLATEDとして記録される
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.status == ObligationStatus.TYPE_B_VIOLATED
+    assert outcome.promised == 1_000_000 and outcome.paid == 1_000_000
 
 
 def test_acceptance_25_type_b_expires_if_eliminated_before_target_vote() -> None:
@@ -106,6 +111,9 @@ def test_acceptance_25_type_b_expires_if_eliminated_before_target_vote() -> None
     )
     assert result.report.violations == []
     assert result.report.payments == []
+    # サイクル4.2c: 義務者が退場していたのでEXPIRED（この投票の精算で確定）
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.status == ObligationStatus.EXPIRED
 
 
 def test_acceptance_26_type_b_expires_if_round_ends_before_target_vote() -> None:
@@ -130,6 +138,34 @@ def test_acceptance_26_type_b_expires_if_round_ends_before_target_vote() -> None
     assert result.report.violations == []
 
 
+def test_acceptance_26b_type_b_expired_via_settle_round_when_target_vote_never_held() -> None:
+    """
+    サイクル4.2c追加: #26と同じ義務（R1V3対象の型B）が、ラウンドの精算
+    （settle_round）で明示的にEXPIREDとして記録されること
+    （engine/settlement.py::_collect_expired_vote_obligations、§6.3・§7.5）。
+
+    settle_voteだけでは「一度も判定されない」だけで、取りこぼしかどうかが
+    わからない。settle_roundが「対象の投票(V3)が行われなかった」ことを
+    検出し、ObligationOutcome(EXPIRED)を必ず1件作ることを確認する。
+    """
+    players = {f"P{i:02d}": _player(f"P{i:02d}", cash=1_000_000) for i in range(1, 13)}
+    ob = _ob_vote("P01", "P02", ObligationType.TYPE_B_VOTE, 1, 3, {"vote": "NO"})
+    contract = _contract("C1", 1, [ob])
+
+    v1 = _make_vote_outcome(round_num=1, vote_num=1, remaining_ids=[f"P{i:02d}" for i in range(1, 13)])
+    v2 = _make_vote_outcome(round_num=1, vote_num=2, remaining_ids=["P01", "P02"])  # V2で決着・ラウンド終了
+    result = settle_round(
+        players, GameConfig.default_12(), round_num=1, votes_in_round=[v1, v2],
+        carryover_in=0, pot_final=12_000_000, aborted=False, logger=EventLogger(),
+        is_final_round=False, contracts=[contract],
+    )
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.obligation_id == "OB1"
+    assert outcome.status == ObligationStatus.EXPIRED
+    assert outcome.vote_num == 3
+    assert outcome.settlement_scope == "vote"
+
+
 def test_acceptance_27_type_b_violation_applies_on_retry_vote() -> None:
     """#27: 型B「R1V1はYES」でNOに投票。V1は6対6（やり直し） → やり直しでも違反。違約金100万"""
     players = {f"P{i:02d}": _player(f"P{i:02d}", cash=1_000_000) for i in range(1, 13)}
@@ -147,6 +183,29 @@ def test_acceptance_27_type_b_violation_applies_on_retry_vote() -> None:
     assert result.outcome.result == "retry"
     assert result.report.violations == [("P01", "OB1")]
     assert result.report.payments[0].paid == 1_000_000
+
+
+def test_acceptance_27b_type_b_kept_when_vote_matches() -> None:
+    """
+    サイクル4.2c追加: 型B「R1V1はYES」でYESに投票（指定どおり） → 違反せず、
+    義務ごとの状態はTYPE_B_KEPT（§7.5の6状態のうち、既存テストに無かった
+    「型Bを守った」のケース）。
+    """
+    players = {f"P{i:02d}": _player(f"P{i:02d}", cash=1_000_000) for i in range(1, 13)}
+    ob = _ob_vote("P01", "P02", ObligationType.TYPE_B_VOTE, 1, 1, {"vote": "YES"})
+    contract = _contract("C1", 1, [ob])
+
+    votes = {f"P{i:02d}": Vote.YES for i in range(1, 7)}
+    votes.update({f"P{i:02d}": Vote.NO for i in range(7, 13)})
+
+    result = settle_vote(
+        players, votes, GameConfig.default_12(), round_num=1, vote_num=1,
+        consecutive_ties_before=0, logger=EventLogger(), contracts=[contract],
+    )
+    assert result.report.violations == []
+    assert result.report.payments == []
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.status == ObligationStatus.TYPE_B_KEPT
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +228,8 @@ def test_acceptance_28_type_c_minority_side_unmet_on_tie() -> None:
     )
     assert result.outcome.result == "retry"
     assert result.report.payments == []
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.status == ObligationStatus.CONDITION_UNMET
 
 
 def test_acceptance_29_type_c_in_minority_unmet_if_eliminated() -> None:
@@ -207,6 +268,9 @@ def test_acceptance_30_type_c_in_minority_met() -> None:
     assert "P03" in result.outcome.remaining_ids
     payment = result.report.payments[0]
     assert payment.promised == 500_000 and payment.paid == 500_000
+    outcome = result.report.obligation_outcomes[0]
+    assert outcome.status == ObligationStatus.PAID
+    assert outcome.promised == 500_000 and outcome.paid == 500_000
 
 
 # ---------------------------------------------------------------------------
@@ -486,3 +550,26 @@ def _make_vote_outcome(
         consecutive_ties_before=0, consecutive_ties_after=0,
         extension_fee_collected=0, round_over=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# 義務ごとの状態（§7.5、サイクル4.2c新設）の6状態の全数確認
+# ---------------------------------------------------------------------------
+
+STATUS_FIXTURES: dict[ObligationStatus, str] = {
+    ObligationStatus.PENDING: "（対象の精算が来るまでObligationOutcomeが作られないこと自体がPENDING。"
+        "専用のfixtureは無い——他の全テストの「まだ精算していない」状態がこれにあたる）",
+    ObligationStatus.PAID: "test_acceptance_30_type_c_in_minority_met",
+    ObligationStatus.TYPE_B_KEPT: "test_acceptance_27b_type_b_kept_when_vote_matches",
+    ObligationStatus.TYPE_B_VIOLATED: "test_acceptance_24_type_b_violation_partial_borrow",
+    ObligationStatus.CONDITION_UNMET: "test_acceptance_28_type_c_minority_side_unmet_on_tie",
+    ObligationStatus.EXPIRED: "test_acceptance_25_type_b_expires_if_eliminated_before_target_vote",
+}
+
+
+def test_status_fixtures_table_covers_all_obligation_statuses() -> None:
+    """
+    STATUS_FIXTURESが§7.5の6状態すべてを持つことを機械的に確かめる
+    （ObligationStatusに状態を足して対応するfixtureを書き忘れたら落ちる）。
+    """
+    assert set(STATUS_FIXTURES) == set(ObligationStatus)

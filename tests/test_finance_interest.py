@@ -89,7 +89,7 @@ def test_acceptance_20_interest_posted_once_per_round_regardless_of_vote_count()
     config = GameConfig.default_12()
     players = {"P01": PlayerState(player_id="P01", cash=0, debt_pre=1_200_000, debt_post=0, initial_loan=1_200_000)}
     logger = EventLogger()
-    updated, interest_total = execute_finance(players, 1, config, logger)
+    updated, interest_total, _interest_by_player = execute_finance(players, 1, config, logger)
 
     interest_events = [e for e in logger.events if e.event_type == "INTEREST" and e.data["player_id"] == "P01"]
     assert len(interest_events) == 1

@@ -16,11 +16,13 @@ v0.3は「投票=ラウンド」で精算が1段だったが、v0.4はラウン�
 「一斉の受け渡しと借金の確定」も `apply_payments()` に切り出して共通化した。
 """
 
+from typing import Literal
+
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.models import (
-    Contract, ContractSettlementReport, ObligationPayment,
-    ObligationType, PlayerState, RoundOutcome, VoteOutcome, Vote,
+    CashMovement, Contract, ContractSettlementReport, LedgerEntryKind, ObligationOutcome,
+    ObligationPayment, ObligationStatus, ObligationType, PlayerState, RoundOutcome, VoteOutcome, Vote,
 )
 from engine import contracts as contract_ops
 from engine import player as player_ops
@@ -31,33 +33,42 @@ from engine import vote as vote_ops
 class VoteSettlementResult:
     """settle_vote() の戻り値"""
 
-    __slots__ = ("players", "outcome", "report")
+    __slots__ = ("players", "outcome", "report", "movements")
 
     def __init__(
         self,
         players: dict[str, PlayerState],
         outcome: VoteOutcome,
         report: ContractSettlementReport,
+        movements: list[CashMovement] = (),  # type: ignore[assignment]
     ) -> None:
         self.players = players
         self.outcome = outcome
         self.report = report
+        self.movements = list(movements)
+        """この精算で生じた、契約以外のお金の動き（延長料・精算での借入、
+        サイクル4.2c新設）。既存の呼び出し元は読まなくても動く（追加のみ）"""
 
 
 class RoundSettlementResult:
     """settle_round() の戻り値"""
 
-    __slots__ = ("players", "outcome", "report")
+    __slots__ = ("players", "outcome", "report", "movements")
 
     def __init__(
         self,
         players: dict[str, PlayerState],
         outcome: RoundOutcome,
         report: ContractSettlementReport,
+        movements: list[CashMovement] = (),  # type: ignore[assignment]
     ) -> None:
         self.players = players
         self.outcome = outcome
         self.report = report
+        self.movements = list(movements)
+        """この精算で生じた、契約以外のお金の動き（精算での借入、サイクル4.2c
+        新設。山の受け取りはRoundOutcome.winner_ids/payout_per_winnerから
+        導けるので入れない）"""
 
 
 def _sorted_active_contracts(contracts: list[Contract]) -> list[Contract]:
@@ -115,12 +126,17 @@ def _plan_payments(
 
 def apply_payments(
     players: dict[str, PlayerState], planned: list[ObligationPayment],
-) -> dict[str, PlayerState]:
+) -> tuple[dict[str, PlayerState], dict[str, int]]:
     """
     一斉の受け渡しと借金の確定（§7.3手順7・§7.4手順6）
 
     全員分の支払い・受取を同時に（1人ずつ順に適用せず、合算した差分として）
     反映する。その後にマイナス分だけを開始後の借金（15%）にする。
+
+    サイクル4.2c: 2つめの戻り値として、この適用で新たに生じた開始後の
+    借金の額（player_id -> 借入額）を返す。settle_negative_cash() が
+    既に計算して捨てていた値を、呼び出し直前の現金（マイナス分）として
+    読むだけで、計算も処理順序も増やさない（§7.5「お金の出入りの記録」用）。
     """
     updated = dict(players)
     net_delta: dict[str, int] = {}
@@ -133,9 +149,12 @@ def apply_payments(
         if delta == 0:
             continue
         updated[pid] = updated[pid].model_copy(update={"cash": updated[pid].cash + delta})
+    borrowed: dict[str, int] = {}
     for pid in list(updated):
+        if updated[pid].cash < 0:
+            borrowed[pid] = -updated[pid].cash
         updated[pid] = player_ops.settle_negative_cash(updated[pid])
-    return updated
+    return updated, borrowed
 
 
 def _shortfall_ids(planned: list[ObligationPayment]) -> list[str]:
@@ -146,6 +165,62 @@ def _shortfall_ids(planned: list[ObligationPayment]) -> list[str]:
         if gap > 0:
             shortfall_by_obligor[item.obligor] = shortfall_by_obligor.get(item.obligor, 0) + gap
     return sorted(shortfall_by_obligor.keys())
+
+
+def _outcome_from_payment(
+    item: ObligationPayment, *, round_num: int, vote_num: int | None, scope: Literal["vote", "round"],
+) -> ObligationOutcome:
+    """
+    支払い対象になった義務（ObligationPayment）を、義務ごとの状態
+    （ObligationOutcome、§7.5）に変換する（サイクル4.2c新設）。
+
+    型Bの違約金は TYPE_B_VIOLATED、それ以外（型A・型C）は PAID。
+    上限で0円になっても「済み」（PAID/TYPE_B_VIOLATED）であることに変わりは
+    ない（§7.3手順6: 部分払いも「支払額の決定」の結果）。
+    """
+    status = (
+        ObligationStatus.TYPE_B_VIOLATED
+        if item.ob_type == ObligationType.TYPE_B_VOTE
+        else ObligationStatus.PAID
+    )
+    return ObligationOutcome(
+        obligation_id=item.obligation_id, contract_id=item.contract_id,
+        contract_seq=item.contract_seq, ob_index=item.ob_index,
+        obligor=item.obligor, counterparty=item.counterparty, ob_type=item.ob_type,
+        round_num=round_num, vote_num=vote_num, status=status,
+        promised=item.promised, paid=item.paid, settlement_scope=scope,
+    )
+
+
+def _collect_expired_vote_obligations(
+    contracts: list[Contract], round_num: int, votes_held: set[int],
+) -> list[ObligationOutcome]:
+    """
+    このラウンドで実際に行われなかった投票（votes_held に無い vote_num）を
+    対象にしていた型B・型C(投票単位)の義務を失効として記録する
+    （サイクル4.2c新設、§6.3「その投票が行われなかった場合…義務は失効する」）。
+
+    決着して残り2人以下になった、またはやり直しの連続でラウンドが打ち切り
+    になった場合、構成上の最大投票数までは投票番号が振られない。すでに
+    行われた投票を対象にした義務は`_collect_vote_due_items`がその投票の
+    精算で評価済み（PENDINGには残らない）なので、settle_round（ラウンドの
+    最後）で、行われなかった投票を対象にした義務だけをここでEXPIREDにする。
+    """
+    outcomes: list[ObligationOutcome] = []
+    for contract in _sorted_active_contracts(contracts):
+        for ob_index, ob in enumerate(contract.obligations):
+            if ob.round_num != round_num or ob.vote_num is None:
+                continue
+            if ob.vote_num in votes_held:
+                continue
+            outcomes.append(ObligationOutcome(
+                obligation_id=ob.obligation_id, contract_id=contract.contract_id,
+                contract_seq=contract.contract_seq, ob_index=ob_index,
+                obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
+                round_num=ob.round_num, vote_num=ob.vote_num,
+                status=ObligationStatus.EXPIRED, settlement_scope="vote",
+            ))
+    return outcomes
 
 
 # =============================================================================
@@ -159,36 +234,60 @@ def _collect_vote_due_items(
     round_num: int,
     vote_num: int,
     config: GameConfig,
-) -> tuple[list[ObligationPayment], list[tuple[str, str]]]:
+) -> tuple[list[ObligationPayment], list[tuple[str, str]], list[ObligationOutcome]]:
     """
     手順3（型Bの監査）・手順4（型Cの投票単位条件判定）: この投票の支払い対象
     になる義務を集める（§7.3手順3/4）
 
     契約の成立順（contract_seq昇順）・同じ契約内では義務の記載順で並べる。
     違約金は破った型B義務のインデックス位置にそのまま置く（§6.3）。
+
+    サイクル4.2c: 3つめの戻り値として、支払い対象にならなかった義務の評価
+    （型Bを守った・失効した・型Cの条件が成立しなかった）もObligationOutcomeで
+    返す（§7.5「義務ごとの状態」用。payable=falseの評価もここで必ず1件作る）。
     """
-    violated_obligations = contract_ops.audit_type_b(contracts, votes, round_num, vote_num)
-    violated_ids = {ob.obligation_id for ob in violated_obligations}
-    violations = [(ob.obligor, ob.obligation_id) for ob in violated_obligations]
+    type_b_results = contract_ops.classify_type_b(contracts, votes, round_num, vote_num)
+    type_b_status_by_id = {ob.obligation_id: status for ob, status in type_b_results}
+    violations = [
+        (ob.obligor, ob.obligation_id) for ob, status in type_b_results
+        if status == ObligationStatus.TYPE_B_VIOLATED
+    ]
 
     items: list[ObligationPayment] = []
+    non_payable: list[ObligationOutcome] = []
     for contract in _sorted_active_contracts(contracts):
         for ob_index, ob in enumerate(contract.obligations):
             if ob.round_num != round_num or ob.vote_num != vote_num:
                 continue
 
             if ob.ob_type == ObligationType.TYPE_B_VOTE:
-                if ob.obligation_id not in violated_ids:
+                status = type_b_status_by_id[ob.obligation_id]
+                if status != ObligationStatus.TYPE_B_VIOLATED:
+                    non_payable.append(ObligationOutcome(
+                        obligation_id=ob.obligation_id, contract_id=contract.contract_id,
+                        contract_seq=contract.contract_seq, ob_index=ob_index,
+                        obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
+                        round_num=ob.round_num, vote_num=ob.vote_num,
+                        status=status, settlement_scope="vote",
+                    ))
                     continue
                 amount = config.penalty_amount
             elif ob.ob_type == ObligationType.TYPE_C_CONDITIONAL:
                 if not contract_ops.evaluate_type_c_vote_condition(ob, outcome):
+                    non_payable.append(ObligationOutcome(
+                        obligation_id=ob.obligation_id, contract_id=contract.contract_id,
+                        contract_seq=contract.contract_seq, ob_index=ob_index,
+                        obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
+                        round_num=ob.round_num, vote_num=ob.vote_num,
+                        status=ObligationStatus.CONDITION_UNMET, settlement_scope="vote",
+                    ))
                     continue
                 amount = contract_ops.resolve_type_c_amount(ob)
             else:
                 continue
 
             items.append(ObligationPayment(
+                obligation_id=ob.obligation_id,
                 contract_id=contract.contract_id,
                 contract_seq=contract.contract_seq,
                 ob_index=ob_index,
@@ -199,7 +298,7 @@ def _collect_vote_due_items(
                 paid=0,
             ))
 
-    return items, violations
+    return items, violations, non_payable
 
 
 def settle_vote(
@@ -231,6 +330,7 @@ def settle_vote(
     """
     contracts = contracts or []
     updated = dict(players)
+    movements: list[CashMovement] = []
 
     # --- 手順1: Reveal（参加した全員の票を公開） ---
     logger.log(
@@ -251,6 +351,10 @@ def settle_vote(
                 "EXTENSION_FEE_COLLECTED", round_num, "settlement", vote_num=vote_num,
                 visibility="self", data={"player_id": pid, "paid": paid, "borrowed": borrowed},
             )
+            movements.append(CashMovement(
+                player_id=pid, kind=LedgerEntryKind.EXTENSION_FEE,
+                amount=paid, cash_delta=-(paid - borrowed), debt_delta=borrowed, borrowed=borrowed,
+            ))
 
     logger.log(
         "VOTE_RESOLVED", round_num, "settlement", step=2, vote_num=vote_num, visibility="public",
@@ -269,7 +373,7 @@ def settle_vote(
         )
 
     # --- 手順3: 型Bの監査／手順4: 型Cの投票単位条件判定 ---
-    due_items, violations = _collect_vote_due_items(
+    due_items, violations, non_payable_outcomes = _collect_vote_due_items(
         contracts, votes, outcome, round_num, vote_num, config,
     )
     violator_ids = sorted({obligor for obligor, _ in violations})
@@ -292,6 +396,7 @@ def settle_vote(
         logger.log(
             "CONTRACT_PAYMENT", round_num, "settlement", step=6, vote_num=vote_num, visibility="parties",
             data={
+                "obligation_id": item.obligation_id,
                 "contract_id": item.contract_id, "contract_seq": item.contract_seq,
                 "ob_index": item.ob_index, "obligor": item.obligor,
                 "counterparty": item.counterparty, "ob_type": item.ob_type.value,
@@ -300,7 +405,13 @@ def settle_vote(
         )
 
     # --- 手順7: 一斉の受け渡しと借金の確定 ---
-    updated = apply_payments(updated, planned)
+    updated, settlement_borrowed = apply_payments(updated, planned)
+    for pid, amount in sorted(settlement_borrowed.items()):
+        if amount > 0:
+            movements.append(CashMovement(
+                player_id=pid, kind=LedgerEntryKind.SETTLEMENT_BORROWING,
+                amount=amount, cash_delta=amount, debt_delta=amount, borrowed=amount,
+            ))
 
     # --- 手順8: 公示 ---
     shortfall_ids = _shortfall_ids(planned)
@@ -310,13 +421,22 @@ def settle_vote(
             data={"player_ids": shortfall_ids},
         )
 
+    payable_outcomes = [
+        _outcome_from_payment(item, round_num=round_num, vote_num=vote_num, scope="vote")
+        for item in planned
+    ]
+    obligation_outcomes = sorted(
+        non_payable_outcomes + payable_outcomes, key=lambda o: (o.contract_seq, o.ob_index),
+    )
+
     report = ContractSettlementReport(
         violations=violations,
         payable_limits=payable_limits,
         payments=planned,
         shortfall_ids=shortfall_ids,
+        obligation_outcomes=obligation_outcomes,
     )
-    return VoteSettlementResult(updated, outcome, report)
+    return VoteSettlementResult(updated, outcome, report, movements)
 
 
 # =============================================================================
@@ -328,12 +448,17 @@ def _collect_round_due_items(
     round_num: int,
     winner_ids: list[str],
     payout_per_winner: int,
-) -> list[ObligationPayment]:
+) -> tuple[list[ObligationPayment], list[ObligationOutcome]]:
     """
     手順2（型Cのラウンド単位条件判定）・手順3（型Aの追加）: このラウンドの
     支払い対象になる義務を集める（§7.4手順2/3）
+
+    サイクル4.2c: 2つめの戻り値として、成立しなかった型Cの条件判定も
+    ObligationOutcome(CONDITION_UNMET)で返す（§7.5用）。型A義務は常に
+    支払い対象になるため、ここには出ない。
     """
     items: list[ObligationPayment] = []
+    non_payable: list[ObligationOutcome] = []
     for contract in _sorted_active_contracts(contracts):
         for ob_index, ob in enumerate(contract.obligations):
             if ob.round_num != round_num or ob.vote_num is not None:
@@ -343,12 +468,20 @@ def _collect_round_due_items(
                 amount = ob.details.get("amount", 0)
             elif ob.ob_type == ObligationType.TYPE_C_CONDITIONAL:
                 if not contract_ops.evaluate_type_c_round_condition(ob, winner_ids):
+                    non_payable.append(ObligationOutcome(
+                        obligation_id=ob.obligation_id, contract_id=contract.contract_id,
+                        contract_seq=contract.contract_seq, ob_index=ob_index,
+                        obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
+                        round_num=ob.round_num, vote_num=None,
+                        status=ObligationStatus.CONDITION_UNMET, settlement_scope="round",
+                    ))
                     continue
                 amount = contract_ops.resolve_type_c_amount(ob, payout_per_winner=payout_per_winner)
             else:
                 continue
 
             items.append(ObligationPayment(
+                obligation_id=ob.obligation_id,
                 contract_id=contract.contract_id,
                 contract_seq=contract.contract_seq,
                 ob_index=ob_index,
@@ -358,7 +491,7 @@ def _collect_round_due_items(
                 promised=amount,
                 paid=0,
             ))
-    return items
+    return items, non_payable
 
 
 def settle_round(
@@ -396,6 +529,7 @@ def settle_round(
     """
     contracts = contracts or []
     updated = dict(players)
+    movements: list[CashMovement] = []
 
     last_vote = votes_in_round[-1]
     winner_ids = [] if aborted else list(last_vote.remaining_ids)
@@ -428,7 +562,13 @@ def settle_round(
         )
 
     # --- 手順2: 型Cのラウンド単位条件判定／手順3: 型Aの追加 ---
-    due_items = _collect_round_due_items(contracts, round_num, winner_ids, payout_per_winner)
+    due_items, round_non_payable_outcomes = _collect_round_due_items(
+        contracts, round_num, winner_ids, payout_per_winner,
+    )
+    votes_held = {v.vote_num for v in votes_in_round}
+    round_non_payable_outcomes = round_non_payable_outcomes + _collect_expired_vote_obligations(
+        contracts, round_num, votes_held,
+    )
 
     # --- 手順4: 支払える上限の固定（山の受け取りを反映した後） ---
     payable_limits = fix_payable_limits(updated, config)
@@ -443,6 +583,7 @@ def settle_round(
         logger.log(
             "CONTRACT_PAYMENT", round_num, "round_settlement", step=5, visibility="parties",
             data={
+                "obligation_id": item.obligation_id,
                 "contract_id": item.contract_id, "contract_seq": item.contract_seq,
                 "ob_index": item.ob_index, "obligor": item.obligor,
                 "counterparty": item.counterparty, "ob_type": item.ob_type.value,
@@ -451,7 +592,13 @@ def settle_round(
         )
 
     # --- 手順6: 一斉の受け渡しと借金の確定 ---
-    updated = apply_payments(updated, planned)
+    updated, settlement_borrowed = apply_payments(updated, planned)
+    for pid, amount in sorted(settlement_borrowed.items()):
+        if amount > 0:
+            movements.append(CashMovement(
+                player_id=pid, kind=LedgerEntryKind.SETTLEMENT_BORROWING,
+                amount=amount, cash_delta=amount, debt_delta=amount, borrowed=amount,
+            ))
 
     # --- 手順7: 公示 ---
     shortfall_ids = _shortfall_ids(planned)
@@ -473,10 +620,18 @@ def settle_round(
         carryover_out=carryover_out,
         destroyed_pot=destroyed_pot,
     )
+    payable_outcomes = [
+        _outcome_from_payment(item, round_num=round_num, vote_num=None, scope="round")
+        for item in planned
+    ]
+    obligation_outcomes = sorted(
+        round_non_payable_outcomes + payable_outcomes, key=lambda o: (o.contract_seq, o.ob_index),
+    )
     report = ContractSettlementReport(
         violations=[],
         payable_limits=payable_limits,
         payments=planned,
         shortfall_ids=shortfall_ids,
+        obligation_outcomes=obligation_outcomes,
     )
-    return RoundSettlementResult(updated, outcome, report)
+    return RoundSettlementResult(updated, outcome, report, movements)
