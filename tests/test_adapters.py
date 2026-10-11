@@ -203,3 +203,49 @@ def test_temperature_fallback_does_not_swallow_unrelated_type_errors(monkeypatch
         adapter.complete(system="sys", messages=[{"role": "user", "content": "hi"}], max_tokens=100)
 
     assert len(fake_messages.calls) == 1
+
+
+# --- extra_paramsのAnthropic直結への伝播（サイクル4.2c仕上げD） ---
+
+def test_m1_request_disables_thinking(monkeypatch):
+    """
+    M1（claude-sonnet-5）はextra_params={"thinking": {"type": "disabled"}}を
+    持つ。Anthropic直結のcomplete()がこれをmessages.create()のkwargsへ
+    混ぜること（試走でM1が考える分だけで出力上限を使い切り本文が空になった
+    事故の再発防止）。
+    """
+    fake_messages = _FakeMessagesEndpoint(side_effects=[_FakeResponse("hello")])
+    model = get_model("M1")
+    adapter = AnthropicAdapter(model)
+    monkeypatch.setattr(adapter, "_get_client", lambda: _FakeAnthropicClient(fake_messages))
+
+    adapter.complete(system="sys", messages=[{"role": "user", "content": "hi"}], max_tokens=100)
+
+    assert fake_messages.calls[0]["thinking"] == {"type": "disabled"}
+
+
+def test_l1_request_has_no_thinking_param(monkeypatch):
+    """L1（Haiku 4.5）はextra_paramsを持たないため、thinkingキーワード自体を送らない"""
+    fake_messages = _FakeMessagesEndpoint(side_effects=[_FakeResponse("hello")])
+    model = get_model("L1")
+    adapter = AnthropicAdapter(model)
+    monkeypatch.setattr(adapter, "_get_client", lambda: _FakeAnthropicClient(fake_messages))
+
+    adapter.complete(system="sys", messages=[{"role": "user", "content": "hi"}], max_tokens=100)
+
+    assert "thinking" not in fake_messages.calls[0]
+
+
+def test_m1_request_options_override_extra_params_thinking(monkeypatch):
+    """呼び出し側がrequest_optionsで同じthinkingキーを渡した場合、request_optionsが勝つ"""
+    fake_messages = _FakeMessagesEndpoint(side_effects=[_FakeResponse("hello")])
+    model = get_model("M1")
+    adapter = AnthropicAdapter(model)
+    monkeypatch.setattr(adapter, "_get_client", lambda: _FakeAnthropicClient(fake_messages))
+
+    adapter.complete(
+        system="sys", messages=[{"role": "user", "content": "hi"}], max_tokens=100,
+        request_options={"thinking": {"type": "enabled", "budget_tokens": 2000}},
+    )
+
+    assert fake_messages.calls[0]["thinking"] == {"type": "enabled", "budget_tokens": 2000}

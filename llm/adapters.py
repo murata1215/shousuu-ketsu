@@ -192,6 +192,13 @@ class AnthropicAdapter:
                     "messages": messages,
                     "max_tokens": max_tokens,
                 }
+                # per-model API固有パラメータ（例: thinking制御、サイクル4.2c仕上げD）。
+                # Anthropic直結はOpenAI互換のextra_bodyと違い、thinking等が
+                # messages.create()の最上位パラメータなのでkwargsへ直に混ぜる。
+                # request_optionsが同じキーを持つ場合はそちらを優先するため、
+                # request_optionsの手前で適用する。
+                if self.model_info.extra_params:
+                    kwargs.update(self.model_info.extra_params)
                 if request_options:
                     kwargs.update(request_options)
                 # Cycle 6.1: thinking有効時、Anthropic/Moonshotはtemperature=1以外を拒否する。

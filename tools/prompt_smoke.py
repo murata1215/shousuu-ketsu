@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,6 +73,7 @@ def main() -> None:
         return
 
     adapter = create_adapter(model_info)
+    started = time.monotonic()
     try:
         text, usage = adapter.complete(
             system=system,
@@ -82,8 +84,20 @@ def main() -> None:
     except AdapterError as e:
         print(f"呼び出し失敗: {e}")
         return
+    elapsed_ms = (time.monotonic() - started) * 1000
 
     cost = usage_cost(model_info, usage)
+    # サイクル4.2c仕上げD: 考える量を指定しない席が出力上限を使い切って本文が
+    # 空になる事故（CLAUDE.md過去の落とし穴⑯）の確認用に、所要時間・
+    # トークンの内訳・reasoning_tokens・finish_reasonを表示する。
+    print(f"所要時間: {elapsed_ms:.0f}ms")
+    print(
+        f"トークン: input={usage.get('input_tokens', 0)} output={usage.get('output_tokens', 0)} "
+        f"cache_read={usage.get('cache_read_input_tokens', 0)} "
+        f"cache_write={usage.get('cache_creation_input_tokens', 0)} "
+        f"reasoning={usage.get('reasoning_tokens', 0)}",
+    )
+    print(f"finish_reason: {usage.get('finish_reason')!r}")
     print(f"実測コスト: ${cost:.5f}")
     print("--- 応答本文 ---")
     print(text)
