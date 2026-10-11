@@ -31,7 +31,7 @@ from engine.config import GameConfig
 from engine.models import Action, PassAction, PlayerState, Vote, VoteCommitAction
 from engine.negotiation import PlayerAgent
 from llm.adapters import AdapterError, _classify_error
-from llm.constants import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, MAX_RETRIES
+from llm.constants import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE, MAX_RETRIES, TURN_PROMPT_MAX_CHARS
 from llm.costing import usage_cost, worst_case_cost
 from llm.game_cost_budget import BudgetBlockedError, GameCostBudget
 from llm.llm_logger import LLMLogger
@@ -147,15 +147,17 @@ class LLMAgent(PlayerAgent):
         self, player_state: PlayerState, round_num: int, vote_num: int, turn: int, visible_state: dict,
     ) -> Action:
         """Negotiationフェイズで1アクションを選択する（§7.2）。解析失敗は1回だけ是正を試みる"""
-        base_prompt = build_negotiation_prompt(
+        turn_prompt = build_negotiation_prompt(
             player_state, round_num, vote_num, turn, visible_state, self.config, memory=self._memory or None,
         )
+        base_prompt = turn_prompt.text
         prompt = base_prompt
 
         for _attempt in range(MAX_RETRIES + 1):
             text, _usage = self._call(
                 self._system_prompt, prompt, max_tokens=DEFAULT_MAX_TOKENS,
                 phase="negotiation", round_num=round_num, vote_num=vote_num, turn=turn,
+                messages_omitted=turn_prompt.omitted_messages,
             )
             self.total_calls += 1
             if text is None:
@@ -201,12 +203,13 @@ class LLMAgent(PlayerAgent):
         自動代行のフローに乗る。§4.4の「1回だけ再試行」を二重にしないための
         設計判断）。
         """
-        prompt = build_commit_prompt(
+        turn_prompt = build_commit_prompt(
             player_state, round_num, vote_num, visible_state, self.config, memory=self._memory or None,
         )
         text, _usage = self._call(
-            self._system_prompt, prompt, max_tokens=DEFAULT_MAX_TOKENS,
+            self._system_prompt, turn_prompt.text, max_tokens=DEFAULT_MAX_TOKENS,
             phase="commit", round_num=round_num, vote_num=vote_num,
+            messages_omitted=turn_prompt.omitted_messages,
         )
         self.total_calls += 1
         if text is None:
@@ -243,13 +246,14 @@ class LLMAgent(PlayerAgent):
         変わった。メモを書き換えられるのはこのメソッドだけ（negotiate/commitの
         応答のmemoryは読まない、#66）。
         """
-        prompt = build_reflection_prompt(
+        turn_prompt = build_reflection_prompt(
             player_state, round_num, vote_num, visible_state, self.config,
             is_round_end=is_round_end, memory=self._memory or None,
         )
         text, _usage = self._call(
-            self._system_prompt, prompt, max_tokens=1200, phase="reflect",
+            self._system_prompt, turn_prompt.text, max_tokens=1200, phase="reflect",
             round_num=round_num, vote_num=vote_num,
+            messages_omitted=turn_prompt.omitted_messages,
         )
         if text is None:
             return
@@ -280,6 +284,7 @@ class LLMAgent(PlayerAgent):
     def _call(
         self, system: str, user_message: str, max_tokens: int, phase: str = "act",
         round_num: int = 0, vote_num: int | None = None, turn: int | None = None,
+        messages_omitted: int = 0,
     ) -> tuple[str | None, dict[str, Any] | None]:
         """
         APIを1回呼び出す。予算ブロック・アダプタエラー・想定外の例外時は
@@ -295,8 +300,14 @@ class LLMAgent(PlayerAgent):
         このフック自体の例外は握りつぶし、試合を止めない）。
 
         サイクル4.2b: vote_num（投票番号、§1.1）を round_num に加えて通す。
-        loan/reflect/post_game は投票の外で起きる呼び出しのためNone。
+        loan/post_game は投票の外で起きる呼び出しのためNone。
+
+        サイクル4.2c: messages_omitted（手番の文面の上限#64のため省いた会話の
+        件数。交渉・投票・振り返り以外は常に0）を記録に残す。user_messageが
+        TURN_PROMPT_MAX_CHARSを超えている場合（会話を全部省いても収まらない
+        場合）はprompt_over_limitとして記録する。
         """
+        prompt_over_limit = len(user_message) > TURN_PROMPT_MAX_CHARS
         self._last_call_was_budget_blocked = False
         reservation = None
         if self.game_cost_budget is not None:
@@ -347,6 +358,7 @@ class LLMAgent(PlayerAgent):
                 phase=phase, round_num=round_num, vote_num=vote_num, turn=turn,
                 system_prompt=system, user_prompt=user_message, response_text=text,
                 usage=usage, cost=cost, elapsed_ms=elapsed_ms, emotion=emotion,
+                messages_omitted=messages_omitted, prompt_over_limit=prompt_over_limit,
             )
             self._notify_call_done(phase, round_num, vote_num, turn, elapsed_ms, ok=True, error_type=None)
             return text, usage
@@ -359,6 +371,7 @@ class LLMAgent(PlayerAgent):
                 phase=phase, round_num=round_num, vote_num=vote_num, turn=turn,
                 system_prompt=system, user_prompt=user_message,
                 error=str(e), error_type=error_type, elapsed_ms=elapsed_ms,
+                messages_omitted=messages_omitted, prompt_over_limit=prompt_over_limit,
             )
             self._notify_call_done(phase, round_num, vote_num, turn, elapsed_ms, ok=False, error_type=error_type)
             return None, None
@@ -370,6 +383,7 @@ class LLMAgent(PlayerAgent):
                 phase=phase, round_num=round_num, vote_num=vote_num, turn=turn,
                 system_prompt=system, user_prompt=user_message,
                 error=str(e), error_type="other", elapsed_ms=elapsed_ms,
+                messages_omitted=messages_omitted, prompt_over_limit=prompt_over_limit,
             )
             self._notify_call_done(phase, round_num, vote_num, turn, elapsed_ms, ok=False, error_type="other")
             return None, None

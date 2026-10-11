@@ -61,12 +61,19 @@ class LLMLogger:
         unit_price_input: float = 0.0,
         unit_price_output: float = 0.0,
         vote_num: int | None = None,
+        messages_omitted: int = 0,
+        prompt_over_limit: bool = False,
     ) -> None:
         """
         1回のLLMコールを記録し、即時にファイルへ追記する
 
         vote_num: 投票番号（v0.4新設、§1.1）。loan/post_game等、投票の外で
             起きる呼び出しはNone。
+        messages_omitted: 手番の文面の上限（15,000字、#64）のため、その投票の
+            会話を古い発言から省いた件数（サイクル4.2c新設。交渉・投票・
+            振り返り以外は常に0）。
+        prompt_over_limit: 会話を全部省いても文面が上限を超えていたか
+            （サイクル4.2c新設。0件の見込み。0でなければ報告する運用）。
         """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -101,6 +108,8 @@ class LLMLogger:
             "response_model": usage.get("response_model"),  # API実返却モデル名（取得不能時はNone）
             "unit_price_input": unit_price_input,   # 単価スナップショット（$/1Mトークン）
             "unit_price_output": unit_price_output,  # 単価スナップショット（$/1Mトークン）
+            "messages_omitted": messages_omitted,
+            "prompt_over_limit": prompt_over_limit,
         }
         with self._lock:
             self._entries.append(entry)
@@ -197,7 +206,8 @@ class LLMLogger:
         self, *, player_id: str, model_id: str, phase: str, round_num: int,
         turn: int | None, system_prompt: str, user_prompt: str,
         error: str, error_type: str, elapsed_ms: float,
-        vote_num: int | None = None,
+        vote_num: int | None = None, retry_count: int = 0,
+        messages_omitted: int = 0, prompt_over_limit: bool = False,
     ) -> None:
         """
         API呼び出しそのものが失敗した（AdapterError・想定外の例外・タイムアウト等）
@@ -208,6 +218,10 @@ class LLMLogger:
         budget_blocked=False のまま error/error_type を埋めることで、
         要約コマンド（scripts/summarize_trial.py）が「時間切れ」「無効な応答」を
         api_called×error_type から正しく集計できるようにする。vote_numは§1.1。
+
+        サイクル4.2c: retry_count（今までlog_call()だけが持っていた）・
+        messages_omitted・prompt_over_limitを失敗行にも足した
+        （失敗した呼び出しの統計も要約コマンドで追えるようにする）。
         """
         entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(), "game_id": self.game_id,
@@ -217,6 +231,8 @@ class LLMLogger:
             "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0,
             "api_called": True, "budget_blocked": False,
             "elapsed_ms": elapsed_ms, "error": error, "error_type": error_type,
+            "retry_count": retry_count,
+            "messages_omitted": messages_omitted, "prompt_over_limit": prompt_over_limit,
         }
         with self._lock:
             self._entries.append(entry)

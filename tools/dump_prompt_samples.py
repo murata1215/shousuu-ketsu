@@ -199,24 +199,26 @@ def main() -> None:
         ("2. 借入額を聞く文面", build_loan_prompt(config)),
         (
             "3. R1V1・1巡目の交渉",
-            build_negotiation_prompt(_player("P01"), 1, 1, 1, p01_neg[(1, 1, 1)], config),
+            build_negotiation_prompt(_player("P01"), 1, 1, 1, p01_neg[(1, 1, 1)], config).text,
         ),
         (
             "4. R1V2 の交渉（退場中のプレイヤー。V1の会話・投票結果・成立本数の公示・"
             "不成立の理由が入った状態）",
-            build_negotiation_prompt(_player("P02"), 1, 2, 2, p02_neg[(1, 2, 2)], config),
+            build_negotiation_prompt(_player("P02"), 1, 2, 2, p02_neg[(1, 2, 2)], config).text,
         ),
         (
             "5. R1V2 の投票（Commit）",
-            build_commit_prompt(_player("P01"), 1, 2, p01_commit[(1, 2)], config),
+            build_commit_prompt(_player("P01"), 1, 2, p01_commit[(1, 2)], config).text,
         ),
         (
             "6. R1 の終わりの振り返り",
-            build_reflection_prompt(_player("P01"), 1, p01_reflect[1], config),
+            build_reflection_prompt(
+                _player("P01"), 1, 2, p01_reflect[(1, 2)], config, is_round_end=True,
+            ).text,
         ),
         (
             "7. R3V1 の交渉（全員の順位が公開された後）",
-            build_negotiation_prompt(_player("P01"), 3, 1, 1, p01_neg[(3, 1, 1)], config),
+            build_negotiation_prompt(_player("P01"), 3, 1, 1, p01_neg[(3, 1, 1)], config).text,
         ),
     ]
 

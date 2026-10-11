@@ -29,10 +29,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from engine.config import GameConfig
-from llm.constants import MEMORY_MAX_LENGTH
+from llm.constants import MEMORY_MAX_LENGTH, TURN_PROMPT_MAX_CHARS
 from llm.formatting import pct, yen
 from llm.providers.devrelay_http import ANONYMIZATION_LINE
 from llm.reasons import reject_reason_ja
@@ -45,6 +45,7 @@ __all__ = [
     "PROMPT_COVERAGE",
     "PROMPT_SUPERSEDED",
     "POST_GAME_COVERAGE",
+    "TurnPrompt",
     "build_system_prompt",
     "build_loan_prompt",
     "build_negotiation_prompt",
@@ -674,15 +675,24 @@ def _render_contracts_pending_block(
     return lines
 
 
-def _render_messages_block(visible_state: dict[str, Any]) -> list[str]:
-    """この投票の会話（どの巡の発言かが分かる形。§9.4、v0.4.3で投票単位になった）"""
+def _render_messages_block(visible_state: dict[str, Any], *, omit: int = 0) -> list[str]:
+    """
+    この投票の会話（どの巡の発言かが分かる形。§9.4、v0.4.3で投票単位になった）
+
+    omit: 手番の文面の上限（#64）のため、古い発言から省いた件数。0なら省略なし。
+    省いたときは、会話の先頭に省いた件数を1行で出す（会話以外には出さない）。
+    """
     round_num = visible_state["round_num"]
     messages = visible_state.get("messages") or []
     lines = ["\n## この投票の会話"]
-    if not messages:
-        lines.append("  まだありません")
+    if omit > 0:
+        lines.append(f"  （文面の上限のため、これより前の発言 {omit}件は省略）")
+    shown = messages[omit:] if omit > 0 else messages
+    if not shown:
+        if omit == 0:
+            lines.append("  まだありません")
         return lines
-    for m in messages:
+    for m in shown:
         tag = f"[R{round_num}V{m.get('vote_num')} {m.get('turn')}巡目]"
         if m["type"] == "broadcast":
             lines.append(f"  {tag} {m['from']} 全体: {m['message']}")
@@ -693,7 +703,7 @@ def _render_messages_block(visible_state: dict[str, Any]) -> list[str]:
 
 def _render_state_body(
     visible_state: dict[str, Any], player_id: str, config: GameConfig, memory: str | None,
-    *, is_reflection: bool = False, is_round_end: bool = False,
+    *, is_reflection: bool = False, is_round_end: bool = False, message_omit: int = 0,
 ) -> list[str]:
     """
     手番ごとの文面の共通本体（承認済み決定3の見出し順）。
@@ -701,6 +711,11 @@ def _render_state_body(
     交渉・投票（Commit）・振り返りは、見出しの行と末尾の指示だけを呼び出し側で
     変え、本体の描画はここに1本化する。振り返りだけ「今の場面」と利息見込みの
     書き方が異なる（is_reflection・is_round_end、§9.4・C-6）。
+
+    message_omit: 手番の文面の上限（#64・§9.4）のため、会話を古い発言から
+    何件省くか。会話以外（本関数のそれ以外の全ブロック）は省かない
+    （_assemble_turn_prompt()が唯一の呼び出し元で、omitを増やしながら
+    再呼び出しして上限に収まる形を探す）。
     """
     lines: list[str] = []
     lines.extend(_render_memory_block(memory))
@@ -722,8 +737,55 @@ def _render_state_body(
     lines.extend(_render_round_contract_counts_block(visible_state))
     lines.extend(_render_my_contracts_block(visible_state, player_id, config))
     lines.extend(_render_contracts_pending_block(visible_state, player_id, config))
-    lines.extend(_render_messages_block(visible_state))
+    lines.extend(_render_messages_block(visible_state, omit=message_omit))
     return lines
+
+
+class TurnPrompt(NamedTuple):
+    """手番の文面の組み立て結果（サイクル4.2c、#64）"""
+
+    text: str
+    """実際に送る文面（user_prompt）"""
+
+    omitted_messages: int
+    """上限のため古い発言から省いた件数（0なら省略なし）"""
+
+
+def _assemble_turn_prompt(
+    heading: str,
+    visible_state: dict[str, Any],
+    player_id: str,
+    config: GameConfig,
+    memory: str | None,
+    tail: str,
+    *,
+    is_reflection: bool = False,
+    is_round_end: bool = False,
+) -> TurnPrompt:
+    """
+    見出し・本体・末尾の指示を組み立て、15,000字（TURN_PROMPT_MAX_CHARS、
+    ルール全文を除く）を超える場合は、その投票の会話を古い発言から1件ずつ
+    省く（§9.4・#64）。
+
+    省くのは会話だけで、会話以外（財務通知・契約・投票結果・お金の出入りの
+    記録・メモ）は省かない。会話をすべて省いても上限を超える場合は、
+    そのまま返す（呼び出し側の記録に残すためomitted_messagesは返す）。
+
+    `visible_state`自体やイベントログは変更しない（省くのはこの関数の
+    戻り値の文字列だけ）。
+    """
+    messages = visible_state.get("messages") or []
+    max_omit = len(messages)
+    text = ""
+    for omit in range(max_omit + 1):
+        body = _render_state_body(
+            visible_state, player_id, config, memory,
+            is_reflection=is_reflection, is_round_end=is_round_end, message_omit=omit,
+        )
+        text = "\n".join([heading, *body, tail])
+        if len(text) <= TURN_PROMPT_MAX_CHARS or omit == max_omit:
+            return TurnPrompt(text, omit)
+    return TurnPrompt(text, max_omit)  # pragma: no cover — ループが必ず内部でreturnする
 
 
 def build_negotiation_prompt(
@@ -735,18 +797,21 @@ def build_negotiation_prompt(
     config: GameConfig,
     *,
     memory: str | None = None,
-) -> str:
-    """Negotiationフェイズ用のユーザープロンプト（§7.2手順2・§9）"""
+) -> TurnPrompt:
+    """
+    Negotiationフェイズ用のユーザープロンプト（§7.2手順2・§9）
+
+    15,000字（TURN_PROMPT_MAX_CHARS）を超える場合は、その投票の会話を古い
+    発言から省く（#64）。戻り値はTurnPrompt（.textが実際の文面）。
+    """
     max_turns = visible_state.get("negotiation_max_turns")
     heading = f"=== R{round_num}V{vote_num} / 交渉（{turn}巡目 / この投票の上限{max_turns}巡） ==="
-    lines: list[str] = [heading]
-    lines.extend(_render_state_body(visible_state, player_state.player_id, config, memory))
-    lines.append(
+    tail = (
         "\n次のアクションを1つ選び、JSON形式で出力してください"
         "（dm/broadcast/transfer/repay/pass/contract_propose/contract_signのいずれか）。\n"
-        + OBJECTIVE_REMINDER_LINE,
+        + OBJECTIVE_REMINDER_LINE
     )
-    return "\n".join(lines)
+    return _assemble_turn_prompt(heading, visible_state, player_state.player_id, config, memory, tail)
 
 
 def build_commit_prompt(
@@ -757,17 +822,20 @@ def build_commit_prompt(
     config: GameConfig,
     *,
     memory: str | None = None,
-) -> str:
-    """Commitフェイズ用のユーザープロンプト（§4.2・§9）"""
+) -> TurnPrompt:
+    """
+    Commitフェイズ用のユーザープロンプト（§4.2・§9）
+
+    15,000字（TURN_PROMPT_MAX_CHARS）を超える場合は、その投票の会話を古い
+    発言から省く（#64）。戻り値はTurnPrompt（.textが実際の文面）。
+    """
     heading = f"=== R{round_num}V{vote_num} / 投票（Commit） ==="
-    lines: list[str] = [heading]
-    lines.extend(_render_state_body(visible_state, player_state.player_id, config, memory))
-    lines.append(
+    tail = (
         "\nYESまたはNOに投票し、JSON形式で出力してください:\n"
         '{"strategy": {...}, "action": {"type": "vote_commit", "vote": "YES"}}\n'
-        + OBJECTIVE_REMINDER_LINE,
+        + OBJECTIVE_REMINDER_LINE
     )
-    return "\n".join(lines)
+    return _assemble_turn_prompt(heading, visible_state, player_state.player_id, config, memory, tail)
 
 
 def build_reflection_prompt(
@@ -779,28 +847,25 @@ def build_reflection_prompt(
     *,
     is_round_end: bool,
     memory: str | None = None,
-) -> str:
+) -> TurnPrompt:
     """
     投票終了後の振り返り（引き継ぎメモ）用のユーザープロンプト（§9.4、v0.4.3）
 
     v0.4.3で「ラウンドの終わりと試合後」から「投票が終わるたびと試合後」に
     変わった。LLMは1-shot呼出しで会話履歴を持たず、次の投票（ラウンドの
-    最後の投票ならラウンドの最後の投票なら次のラウンド）へ持ち越せるのは
-    ここで書く自由記述メモ1枚だけ。契約・投票結果・ラウンドの結果・順位・
-    お金の出入りの記録は手番のたびに提示されるので、メモに書き写す必要は
-    ないことを事実として伝える。
+    最後の投票なら次のラウンド）へ持ち越せるのはここで書く自由記述メモ1枚
+    だけ。契約・投票結果・ラウンドの結果・順位・お金の出入りの記録は手番の
+    たびに提示されるので、メモに書き写す必要はないことを事実として伝える。
+
+    15,000字（TURN_PROMPT_MAX_CHARS）を超える場合は、その投票の会話を古い
+    発言から省く（#64）。戻り値はTurnPrompt（.textが実際の文面）。
     """
     heading = f"=== R{round_num}V{vote_num} / 振り返り（引き継ぎメモ） ==="
-    lines: list[str] = [heading]
-    lines.extend(_render_state_body(
-        visible_state, player_state.player_id, config, memory,
-        is_reflection=True, is_round_end=is_round_end,
-    ))
     if is_round_end:
         scope, next_scope, next_unit = "このラウンド", "次のラウンド以降", "ラウンド"
     else:
         scope, next_scope, next_unit = "この投票", "次の投票以降", "投票"
-    lines.append(
+    tail = (
         f"\n{scope}を終えました。{next_scope}の自分に残したいことを"
         f"{MEMORY_MAX_LENGTH}字以内で自由に書いてください。\n"
         "形式は自由（箇条書き・散文・表、何でも構いません）。何を書き、何を書かないかもあなたの判断です。\n"
@@ -813,9 +878,12 @@ def build_reflection_prompt(
         "提示されるので、書き写す必要はありません。\n"
         "このフェイズでは action や strategy を出力しないでください。"
         '出力は次のJSON形式だけです: {"memory": "（ここにメモを書く）"}\n'
-        + OBJECTIVE_REMINDER_LINE,
+        + OBJECTIVE_REMINDER_LINE
     )
-    return "\n".join(lines)
+    return _assemble_turn_prompt(
+        heading, visible_state, player_state.player_id, config, memory, tail,
+        is_reflection=True, is_round_end=is_round_end,
+    )
 
 
 def _render_all_final_ranks_and_assets_block(post_game_context: dict[str, Any]) -> list[str]:

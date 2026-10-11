@@ -62,7 +62,7 @@ def main() -> None:
 
     include_anonymization = model_info.adapter_type != "devrelay_http"
     system = build_system_prompt(args.player_id, config, include_anonymization=include_anonymization)
-    user = build_negotiation_prompt(player_state, 1, 1, 1, visible_state, config)
+    user = build_negotiation_prompt(player_state, 1, 1, 1, visible_state, config).text
 
     estimated = worst_case_cost(model_info, system, user, DEFAULT_MAX_TOKENS)
     print(f"モデル: {args.model} ({model_info.model_id})")

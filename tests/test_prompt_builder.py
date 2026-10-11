@@ -199,11 +199,11 @@ def test_all_json_requesting_prompts_contain_json_word(fixture_game):
     vs = snapshots["P01"][(1, 1, 1)]
     post_ctx = _post_game_context(_game, result, "P01")
     prompts = {
-        "negotiation": build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config),
-        "commit": build_commit_prompt(_ps("P01"), 1, 1, vs, config),
+        "negotiation": build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text,
+        "commit": build_commit_prompt(_ps("P01"), 1, 1, vs, config).text,
         "reflection": build_reflection_prompt(
             _ps("P01"), 1, 2, reflect_snapshots["P01"][(1, 2)], config, is_round_end=True,
-        ),
+        ).text,
         "post_game": build_post_game_reflection_prompt(config, post_ctx),
     }
     for name, text in prompts.items():
@@ -218,7 +218,7 @@ def test_all_json_requesting_prompts_contain_json_word(fixture_game):
 def test_negotiation_heading_shows_round_vote_turn_and_max_turns_first(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 1)]
-    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text
     assert "=== R1V1 / 交渉（1巡目 / この投票の上限10巡） ===" in text.splitlines()[0]
 
 
@@ -227,14 +227,14 @@ def test_negotiation_heading_shows_max_turns_next_after_decisive_vote(fixture_ga
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 2, 1)]
     assert vs["negotiation_max_turns"] == config.negotiation_max_turns_next
-    text = build_negotiation_prompt(_ps("P01"), 1, 2, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 2, 1, vs, config).text
     assert f"この投票の上限{config.negotiation_max_turns_next}巡" in text.splitlines()[0]
 
 
 def test_commit_heading_shows_round_and_vote(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 3)]
-    text = build_commit_prompt(_ps("P01"), 1, 1, vs, config)
+    text = build_commit_prompt(_ps("P01"), 1, 1, vs, config).text
     assert text.splitlines()[0] == "=== R1V1 / 投票（Commit） ==="
 
 
@@ -243,7 +243,7 @@ def test_reflection_heading_shows_round_and_vote(fixture_game):
     _game, config, _result, _s, reflect_snapshots = fixture_game
     text = build_reflection_prompt(
         _ps("P01"), 1, 2, reflect_snapshots["P01"][(1, 2)], config, is_round_end=True,
-    )
+    ).text
     assert text.splitlines()[0] == "=== R1V2 / 振り返り（引き継ぎメモ） ==="
 
 
@@ -252,7 +252,7 @@ def test_reflection_mid_round_heading_shows_vote_num(fixture_game):
     _game, config, _result, _s, reflect_snapshots = fixture_game
     text = build_reflection_prompt(
         _ps("P01"), 1, 1, reflect_snapshots["P01"][(1, 1)], config, is_round_end=False,
-    )
+    ).text
     assert text.splitlines()[0] == "=== R1V1 / 振り返り（引き継ぎメモ） ==="
 
 
@@ -262,7 +262,7 @@ def test_retired_player_situation_shows_fixed_sentence(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P02"][(1, 2, 1)]
     assert "P02" in vs["eliminated_ids"]
-    text = build_negotiation_prompt(_ps("P02"), 1, 2, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P02"), 1, 2, 1, vs, config).text
     assert (
         "あなた（P02）はこのラウンド（R1）で退場しています。"
         "このラウンドの投票はできません。次のラウンドには戻ります。"
@@ -273,7 +273,7 @@ def test_remaining_player_situation_has_no_retired_sentence(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 2, 1)]
     assert "P01" not in vs["eliminated_ids"]
-    text = build_negotiation_prompt(_ps("P01"), 1, 2, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 2, 1, vs, config).text
     assert "退場しています" not in text
 
 
@@ -283,7 +283,7 @@ def test_last_action_error_shown_in_japanese_to_actor_only(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs09 = snapshots["P09"][(1, 2, 2)]
     assert vs09["my_last_action_error"] is not None
-    text09 = build_negotiation_prompt(_ps("P09"), 1, 2, 2, vs09, config)
+    text09 = build_negotiation_prompt(_ps("P09"), 1, 2, 2, vs09, config).text
     assert "不成立:" in text09
     assert "送金できるのは現金の範囲内だけです" in text09
     assert "Insufficient cash" not in text09
@@ -292,7 +292,7 @@ def test_last_action_error_shown_in_japanese_to_actor_only(fixture_game):
 
     # 他プレイヤーには出ない
     vs01 = snapshots["P01"][(1, 2, 2)]
-    text01 = build_negotiation_prompt(_ps("P01"), 1, 2, 2, vs01, config)
+    text01 = build_negotiation_prompt(_ps("P01"), 1, 2, 2, vs01, config).text
     assert "不成立:" not in text01
 
 
@@ -300,7 +300,7 @@ def test_no_action_error_shows_fact_not_blank(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 1)]
     assert vs["my_last_action_error"] is None
-    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text
     assert "## 直前の行動の結果\n  まだありません" in text
 
 
@@ -309,7 +309,7 @@ def test_no_action_error_shows_fact_not_blank(fixture_game):
 def test_pending_contract_shown_to_counterparty_with_contract_id_and_sign_method(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P07"][(1, 1, 2)]
-    text = build_negotiation_prompt(_ps("P07"), 1, 1, 2, vs, config)
+    text = build_negotiation_prompt(_ps("P07"), 1, 1, 2, vs, config).text
     contract_id = vs["contracts_pending"][0]["contract_id"]
     assert contract_id in text
     assert "300,000円" in text
@@ -320,8 +320,8 @@ def test_established_contract_shown_to_both_parties(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs01 = snapshots["P01"][(1, 1, 3)]
     vs07 = snapshots["P07"][(1, 1, 3)]
-    text01 = build_negotiation_prompt(_ps("P01"), 1, 1, 3, vs01, config)
-    text07 = build_negotiation_prompt(_ps("P07"), 1, 1, 3, vs07, config)
+    text01 = build_negotiation_prompt(_ps("P01"), 1, 1, 3, vs01, config).text
+    text07 = build_negotiation_prompt(_ps("P07"), 1, 1, 3, vs07, config).text
     assert "あなたは P07へ300,000円支払わなければならない" in text01
     assert "P01は あなたへ300,000円支払わなければならない" in text07
 
@@ -330,7 +330,7 @@ def test_contract_fully_hidden_from_non_party(fixture_game):
     """v0.4は契約の存在そのものが非公開（§1.2/§8）。当事者以外には一切出ない"""
     _game, config, _result, snapshots, _r = fixture_game
     vs03 = snapshots["P03"][(1, 1, 3)]
-    text03 = build_negotiation_prompt(_ps("P03"), 1, 1, 3, vs03, config)
+    text03 = build_negotiation_prompt(_ps("P03"), 1, 1, 3, vs03, config).text
     assert "300,000円" not in text03
     assert "type_a_payment" not in text03
     contract_id = snapshots["P01"][(1, 1, 3)]["my_contracts"][0]["contract_id"]
@@ -342,7 +342,7 @@ def test_contract_fully_hidden_from_non_party(fixture_game):
 def test_finance_notice_shows_non_repayable_rate_once(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 1)]
-    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text
     assert "開始前の借金（5%・返済不可）" in text
     assert text.count("返済不可") == 1
     assert "開始後の借金（15%）" in text
@@ -351,7 +351,7 @@ def test_finance_notice_shows_non_repayable_rate_once(fixture_game):
 def test_finance_notice_includes_current_rank(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 1)]
-    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 1, vs, config).text
     assert "あなたの現在順位" in text
     assert "/ 12人" in text
 
@@ -380,7 +380,7 @@ def test_commit_prompt_shows_type_b_obligation_and_penalty():
     game.run()
     snaps = {(r, v, t): vs for r, v, t, vs in recorder.negotiate_snapshots}
     vs = snaps[(1, 1, 3)]
-    text = build_commit_prompt(_ps("P01"), 1, 1, vs, config)
+    text = build_commit_prompt(_ps("P01"), 1, 1, vs, config).text
     assert "YESへ投票しなければならない" in text
     assert f"{config.penalty_amount:,}円" in text
 
@@ -404,7 +404,7 @@ def test_prompt_coverage_matches_visible_state_keys_exactly(fixture_game):
 def test_prompt_coverage_headings_and_representative_values_appear(fixture_game):
     _game, config, _result, snapshots, _r = fixture_game
     vs = snapshots["P01"][(1, 1, 3)]
-    text = build_negotiation_prompt(_ps("P01"), 1, 1, 3, vs, config)
+    text = build_negotiation_prompt(_ps("P01"), 1, 1, 3, vs, config).text
 
     for key, heading in PROMPT_COVERAGE.items():
         assert heading in text, f"{key} の見出し {heading!r} が文面に無い"

@@ -336,7 +336,7 @@ def test_acceptance_55_vote_conversation_and_memo_carry_per_vote() -> None:
         PlayerState(player_id="P04", cash=0, initial_loan=0), 1, 2, 2,
         by_turn[(1, 2, 2)], GameConfig.dev_small(num_players=12, num_rounds=1),
         memory="R1V1で書いたメモ",
-    )
+    ).text
     assert "R1V1で書いたメモ" in text_with_memo
     assert "V1の全体発言" not in text_with_memo
     assert "V1のDM" not in text_with_memo
