@@ -1,6 +1,6 @@
-# 受け入れテスト対応表（v0.4.3 §12.3、サイクル4.0・4.1・4.2・4.2c）
+# 受け入れテスト対応表（v0.4.4 §12.3、サイクル4.0・4.1・4.2・4.2c・4.2d）
 
-仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_3.md` §12.3 の66件すべてに
+仕様書 `doc/uso8000000_shousuu_ketsu_spec_v0_4_4.md` §12.3 の68件すべてに
 対応するpytest関数の一覧。命名は既存コードベース（v0.3）の慣例
 （`test_acceptance_{番号}_{内容}`）に揃えた。#47・#48は出題AI・履歴ファイル
 （`llm/questions.py`）の対応がサイクル4.2bで完了し、合格になった（下記注2参照）。
@@ -12,11 +12,16 @@
 engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 対応）。#58〜#66はサイクル4.2cで追加された（v0.4.3 §11.8。本人・当事者だけに
 渡すお金の出入りの記録・義務ごとの状態・契約の表示範囲・文面の15,000字上限・
-試合後振り返り・署名済み表示・メモ1,000字上限の確認。対応は
-`tests/test_acceptance_58_to_66.py`）。v0.4.3はv0.4.2からルールの変更はなく、
+試合後振り返り・署名済み表示・メモ字数上限の確認。対応は
+`tests/test_acceptance_58_to_68.py`）。v0.4.3はv0.4.2からルールの変更はなく、
 サイクル4.2の結果を反映した書き直し（#55・#56の文言更新、#58〜#66の追加）
 で、#1〜#57の実装はそのまま（CLAUDE.mdの「v0.4.2はv0.4.1からルールの変更は
 ない」と同じ位置づけ）。
+
+#66はサイクル4.2dでv0.4.4に合わせて書き直した（求める字数1,000字と切り捨てる
+字数1,500字を分けたため、場面を1,200字/1,600字のメモに変更）。#67（署名待ちの
+提案を2つの見出しに分ける）・#68（契約IDの「契約」除去）はサイクル4.2dで新規
+追加（v0.4.4 §11.9 #3・#4。対応は`tests/test_acceptance_58_to_68.py`）。
 
 | # | 場面（仕様書の表現） | pytest関数 | 状態 |
 | --- | --- | --- | --- |
@@ -77,20 +82,22 @@ engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 | 55 | R1V2の交渉中 | `tests/test_public_disclosure.py::test_acceptance_55_round_conversation_carries_across_votes` | 合格 |
 | 56 | R1V1が決着してV2へ続くとき。R1の最後の投票の後 | `tests/test_public_disclosure.py::test_acceptance_56_reflection_sees_whole_round_and_next_round_starts_empty` | 合格 |
 | 57 | 手持ちを超える送金をした、次の手番 | `tests/test_public_disclosure.py::test_acceptance_57_rejection_reason_is_japanese_sentence_to_actor_only` | 合格 |
-| 58 | P01がP02へ30万を送金した、次の手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_58_transfer_recorded_only_for_sender_and_receiver` | 合格 |
-| 59 | R1V1で型B違反があり、ラウンドがV2へ続く | `tests/test_acceptance_58_to_66.py::test_acceptance_59_type_b_penalty_visible_to_parties_only` | 合格 |
-| 60 | R1の終わりに、割合契約（25%）の支払いと、払いきれなかった型Aがある | `tests/test_acceptance_58_to_66.py::test_acceptance_60_round_settlement_payments_visible_with_payout_and_interest` | 合格 |
-| 61 | R1V1を対象にした型Cが支払われた後の、R1V2 | `tests/test_acceptance_58_to_66.py::test_acceptance_61_type_c_payment_moves_obligation_to_paid_in_my_contract_status` | 合格 |
-| 62 | 試合後の振り返り | `tests/test_acceptance_58_to_66.py::test_acceptance_62_post_game_reflection_carries_results_ranks_and_cash_flow` | 合格 |
-| 63 | P01が提案して署名済みの提案が、P02の署名待ちで残っている手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_63_signed_proposal_shows_signed_status_not_sign_method` | 合格 |
-| 64 | 会話が積み上がり、省かなければ文面が15,000字を超える手番 | `tests/test_acceptance_58_to_66.py::test_acceptance_64_old_messages_omitted_when_body_exceeds_limit` | 合格 |
-| 65 | R1ですべての義務が済んだ契約と、R2を対象にした型Aが残っている契約がある、R2V1 | `tests/test_acceptance_58_to_66.py::test_acceptance_65_fully_settled_contract_hidden_pending_contract_shown` | 合格 |
-| 66 | 振り返りで、1,000字を超えるメモを返した。別の席が、交渉の応答にメモを入れて返した | `tests/test_acceptance_58_to_66.py::test_acceptance_66_memory_truncated_at_1000_and_not_updated_by_negotiate_response` | 合格 |
+| 58 | P01がP02へ30万を送金した、次の手番 | `tests/test_acceptance_58_to_68.py::test_acceptance_58_transfer_recorded_only_for_sender_and_receiver` | 合格 |
+| 59 | R1V1で型B違反があり、ラウンドがV2へ続く | `tests/test_acceptance_58_to_68.py::test_acceptance_59_type_b_penalty_visible_to_parties_only` | 合格 |
+| 60 | R1の終わりに、割合契約（25%）の支払いと、払いきれなかった型Aがある | `tests/test_acceptance_58_to_68.py::test_acceptance_60_round_settlement_payments_visible_with_payout_and_interest` | 合格 |
+| 61 | R1V1を対象にした型Cが支払われた後の、R1V2 | `tests/test_acceptance_58_to_68.py::test_acceptance_61_type_c_payment_moves_obligation_to_paid_in_my_contract_status` | 合格 |
+| 62 | 試合後の振り返り | `tests/test_acceptance_58_to_68.py::test_acceptance_62_post_game_reflection_carries_results_ranks_and_cash_flow` | 合格 |
+| 63 | P01が提案して署名済みの提案が、P02の署名待ちで残っている手番 | `tests/test_acceptance_58_to_68.py::test_acceptance_63_signed_proposal_shows_signed_status_not_sign_method` | 合格 |
+| 64 | 会話が積み上がり、省かなければ文面が15,000字を超える手番 | `tests/test_acceptance_58_to_68.py::test_acceptance_64_old_messages_omitted_when_body_exceeds_limit` | 合格 |
+| 65 | R1ですべての義務が済んだ契約と、R2を対象にした型Aが残っている契約がある、R2V1 | `tests/test_acceptance_58_to_68.py::test_acceptance_65_fully_settled_contract_hidden_pending_contract_shown` | 合格 |
+| 66 | 振り返りで、1,200字のメモを返した席と、1,600字のメモを返した席がある。別の席が、交渉の応答にメモを入れて返した | `tests/test_acceptance_58_to_68.py::test_acceptance_66_memory_truncated_at_1500_and_not_updated_by_negotiate_response` | 合格 |
+| 67 | P01が提案して署名済みの提案と、P03が提案してP01の署名を待っている提案が、同時にある手番 | `tests/test_acceptance_58_to_68.py::test_acceptance_67_pending_proposals_split_into_two_headings` | 合格 |
+| 68 | 署名の行動で、契約IDの前に「契約」の字を付けて送った | `tests/test_acceptance_58_to_68.py::test_acceptance_68_contract_sign_with_contract_kanji_prefix_still_succeeds`（存在しないIDの場合は`test_acceptance_68_nonexistent_contract_id_rejected_without_doubled_kanji`） | 合格 |
 
 ## 集計
 
-- 合格: 66件（#1〜#66）。skipは0件
-- 1件も省いていない（#1〜#66がすべて表に存在する）
+- 合格: 68件（#1〜#68）。skipは0件
+- 1件も省いていない（#1〜#68がすべて表に存在する）
 
 ## 注1: #42（v0.4.1での仕様書修正の反映）
 
@@ -157,9 +164,29 @@ _obligation_status_sentence`の「はが」「はの」「へ済み」という�
 `doc/analysis/prompt_samples_v0_4.md`に見本4つ（8〜11）を足して実際の
 文面を目で確認する運用に変えた。
 
+## 注5: サイクル4.2d（v0.4.4対応）の実装方法
+
+- メモの字数は、`llm/constants.py`の`MEMORY_MAX_LENGTH`（1,000字）を
+  `MEMORY_REQUEST_MAX_LENGTH`（1,000字、文面でAIに求める字数）と
+  `MEMORY_TRUNCATE_LENGTH`（1,500字、実際に切り捨てる字数）の2つに分けた。
+  2回目の12席試走（§12.10）でメモ72件のうち18件が1,000字を超えて
+  末尾を切られたため。
+- 署名待ちの契約提案は、`llm/prompt_builder.py::_render_contracts_pending_block`
+  が「## あなたの署名を待っている契約提案」と「## あなたは署名済みで、
+  相手の署名を待っている契約提案」の2つの見出しに分けて出す。見出し名を
+  引用する`llm/reasons.py`のCONTRACT_NOT_FOUND文も合わせた。
+- 契約IDの前処理（先頭の「契約」の字と直後の空白を外す）は
+  `llm/response_parser.py::_strip_contract_id_prefix`で行い、エンジンは
+  変更していない。
+- Opus席（H1）は`llm/models.py`でAPIを直接呼ぶ席に替え、M1と同じ
+  `extra_params={"thinking": {"type": "disabled"}}`を追加した
+  （`DR_OPUS`は変更していない。受け入れテストの対象外）。
+- `doc/analysis/prompt_samples_v0_4.md`に見本12（R1V1・8巡目、2つの見出しが
+  同時に出る場面）を足し、実際の文面を目で確認した。
+
 ## 既存エンジンテストとの関係
 
-受け入れテスト57件に加えて、エンジンの単体テスト（`test_vote_round.py`・
+受け入れテスト68件に加えて、エンジンの単体テスト（`test_vote_round.py`・
 `test_settlement_v0_4.py`・`test_contracts.py`・`test_event_visibility.py`等）
 と、追加確認3点（保存則・再現性・投票回数の上限、`test_invariants.py`）で
 エンジン全体の整合性を確認している。テスト件数の内訳は devlog を参照。

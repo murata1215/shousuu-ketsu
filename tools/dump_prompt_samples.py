@@ -1,5 +1,6 @@
 """
-文面の見本を作るコマンド（サイクル4.2b B9、サイクル4.2cで4つ追加）
+文面の見本を作るコマンド（サイクル4.2b B9、サイクル4.2cで4つ追加、
+サイクル4.2dで1つ追加）
 
 AIは一切呼ばない。固定シードで動かした試合の実際の`visible_state`から、
 `llm/prompt_builder.py`の各build_*関数で文面を組み立て、
@@ -10,7 +11,7 @@ AIは一切呼ばない。固定シードで動かした試合の実際の`visib
 importせず、台本どおりに動く最小限のエージェントをこのファイル内だけに
 用意する。
 
-見本11つ:
+見本12つ:
   1. ルール全文（システムプロンプト）
   2. 借入額を聞く文面
   3. R1V1・1巡目の交渉
@@ -24,6 +25,9 @@ importせず、台本どおりに動く最小限のエージェントをこの�
   10. R2V1 の交渉（R1で送金を受け取り、割合契約の支払いを受け、型Aを
       払い終えたプレイヤー。前のラウンドで全義務が済んだ契約は出ない）
   11. 上限に届いて古い発言が省かれた、R1V1 終盤の交渉
+  12. R1V1・8巡目の交渉（本人が署名済みで相手を待っている提案と、相手が
+      提案して本人の署名を待っている提案が、同時にある場面。署名待ちの
+      提案が2つの見出しに分かれて出る、サイクル4.2d・§7.5）
 
 使用方法:
     uv run python tools/dump_prompt_samples.py
@@ -192,6 +196,23 @@ def _build_fixture() -> tuple[Game, dict[str, _Recorder], GameConfig]:
     )
     negotiate_actions["P02"][(1, 2, 1)] = TransferAction(player_id="P02", to="P08", amount=50_000_000)
 
+    # 見本12（署名待ちの2つの見出しが同時に出る場面）用に、どちらも最後まで
+    # 署名がそろわない（誰にも署名させない）契約を2本つくる。
+    # 契約D: P01がP09へ提案（P01は自動で署名済み、P09は署名しない）→
+    #   P01視点では「あなたは署名済みで、相手の署名を待っている」側
+    negotiate_actions["P01"][(1, 1, 7)] = ContractProposeAction(
+        player_id="P01", with_players=["P09"],
+        terms=[{"obligor": "P01", "counterparty": "P09", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 100_000}}],
+    )
+    # 契約E: P03がP01へ提案（P03は自動で署名済み、P01は署名しない）→
+    #   P01視点では「あなたの署名を待っている」側
+    negotiate_actions["P03"][(1, 1, 1)] = ContractProposeAction(
+        player_id="P03", with_players=["P01"],
+        terms=[{"obligor": "P03", "counterparty": "P01", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 50_000}}],
+    )
+
     # 見本10（お金の出入りが入ったR2V1の交渉）用に、済んだ義務（型A・R1払い）・
     # 型Bを守った義務（R1V2のYES）・これからの義務（型A・R2払い）が1本ずつ
     # そろう契約を、P01がP07へ提案・署名する（B-1）。
@@ -308,10 +329,15 @@ def main() -> None:
             "11. 上限に届いて古い発言が省かれた、R1V1 終盤の交渉",
             build_negotiation_prompt(_player("P01"), 1, 1, 10, p01_neg[(1, 1, 10)], config).text,
         ),
+        (
+            "12. R1V1・8巡目の交渉（本人が署名済みで相手を待っている提案と、"
+            "相手が提案して本人の署名を待っている提案が、同時にある場面）",
+            build_negotiation_prompt(_player("P01"), 1, 1, 8, p01_neg[(1, 1, 8)], config).text,
+        ),
     ]
 
     lines = [
-        "# プロンプト文面の見本（v0.4.3、サイクル4.2c）",
+        "# プロンプト文面の見本（v0.4.4、サイクル4.2d）",
         "",
         "`tools/dump_prompt_samples.py`が、固定シードの試合（AIは呼ばない。"
         "台本どおりに動くエージェント）の実際の`visible_state`から"
