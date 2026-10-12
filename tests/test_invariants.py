@@ -200,7 +200,15 @@ def test_100_random_contract_games_have_no_stale_pending_obligations() -> None:
     対象ラウンドの投票・ラウンドの精算は試合完了までに必ず一度は実行される
     （stop_after_roundを使っていないため）ので、終局時点でPENDINGの
     ACTIVE義務が残っていればエンジン側の取りこぼしを意味する。
+
+    山分け（pool_share、サイクル5.0）だけは対象外: ほかの義務と違い
+    「1つの義務=1回の精算で1度だけ判定」ではなく、成立したラウンドから
+    最終ラウンドまで毎ラウンド判定され続ける。当事者が一度も山を受け取ら
+    なければ、試合が終わるまで一度もObligationOutcomeが作られないのが
+    正しい挙動であり、取りこぼしではない（engine/settlement.py
+    ::_collect_round_due_itemsのコメント参照）。
     """
+    from engine.contracts import is_pool_share_obligation
     from engine.models import ContractStatus
 
     for seed in range(NUM_GAMES):
@@ -209,6 +217,8 @@ def test_100_random_contract_games_have_no_stale_pending_obligations() -> None:
             if contract.status != ContractStatus.ACTIVE:
                 continue
             for ob in contract.obligations:
+                if is_pool_share_obligation(ob):
+                    continue
                 assert ob.obligation_id in game._obligation_outcomes, (
                     seed, contract.contract_id, ob.obligation_id,
                 )

@@ -11,6 +11,10 @@ v0.3では `tests/helpers.py::RandomContractAgent` が本番コード
 v0.3との違い: 型B・型C(minority_side/in_minority)はvote_numも無作為に選ぶ
 （§9.3）。型C(wins_round)はvote_num=Noneで、target_player==obligorのときは
 share_percentも候補に混ぜる（§6.4）。
+
+サイクル5.0で型Cにpool_share（山分け）を足した。condition_typeの無作為選択に
+POOL_SHAREが混ざるため、obligor/counterparty/round_num/vote_numを持たない
+専用の形（§6.4/§9.3）を別枝で作る。
 """
 
 import random
@@ -108,6 +112,15 @@ class RandomContractBot(PlayerAgent):
             }
         else:
             condition_type = self.rng.choice(list(ConditionType))
+            if condition_type == ConditionType.POOL_SHARE:
+                # 山分け: obligor/counterparty/round_num/vote_numを持たない
+                # 専用の形（§6.4/§9.3）。当事者はwith_playersから決まる
+                details = {
+                    "share_percent": self.rng.choice([10, 25, 50, 75, 100]),
+                    "condition_type": condition_type.value,
+                }
+                term = {"ob_type": ob_type.value, "details": details}
+                return ContractProposeAction(player_id=pid, with_players=[target], terms=[term])
             if condition_type == ConditionType.WINS_ROUND:
                 target_round, _ = self._pick_target_round_vote(round_num, vote_num, vote_level=False)
                 target_vote = None

@@ -1,10 +1,9 @@
 """
 プロンプト生成モジュール（§9・§13）
 
-ルール全文は §13.1 の本文を逐語で使い、承認済みの6行だけを足す（サイクル4.2b、
-下記 `RULES_TEMPLATE` のdocstring参照）。数値は GameConfig から差し込む
-（`str.format` の `{var}` 記法。§13.1 のJSON例はすでに `{{ }}` で二重エスケープ
-されているため、そのまま `str.format` に使える）。
+ルール全文は §13.1 の本文を逐語で使う（下記 `RULES_TEMPLATE` のdocstring参照）。
+数値は GameConfig から差し込む（`str.format` の `{var}` 記法。§13.1 のJSON例は
+すでに `{{ }}` で二重エスケープされているため、そのまま `str.format` に使える）。
 `tests/test_prompt_builder_rules.py` で仕様書ファイルと逐語一致することを固定する。
 
 公開情報・本人限定情報の出し分けは一切ここで再実装しない。
@@ -60,10 +59,10 @@ OBJECTIVE_REMINDER_LINE = (
 
 # --- §13.1 ルール要約（正本）。{var} は str.format で差し込む ---
 #
-# 本文は仕様書 doc/uso8000000_shousuu_ketsu_spec_v0_4_4.md §13.1と1行も違わない
-# （サイクル4.2.2で確定。サイクル4.2までの「承認済みの6行」は仕様書v0.4.3の
-# §13.1に吸収されたため、差分の表は廃止した。v0.4.4ではメモの切り捨て字数の
-# 行だけが変わった）。
+# 本文は仕様書 doc/uso8000000_shousuu_ketsu_spec_v0_5.md §13.1と1行も違わない
+# （サイクル5.0で山分け（pool_share）を足した。型Cの条件が3種→4種になり、
+# 山分けの説明7行と「後の投票・ラウンドも指定できる」の1行、進行の1行、
+# 書き方の例の1行、注の書き直しが差分。§11.10参照）。
 # `tests/test_prompt_builder_rules.py::test_rules_template_matches_spec_verbatim`
 # が、仕様書から抽出した§13.1本文と本定数の完全一致を機械的に確かめる
 # （仕様書を直しても文面を直し忘れたら落ちる）。
@@ -124,13 +123,21 @@ RULES_TEMPLATE = """# 少数決 ルール
   - やり直しになった投票でも、違反の判定は行われる
   - 同じ投票にYES指定とNO指定の両方を負った場合、必ずどちらかの違反になる
 - 型C（条件付き金銭）: 指定した条件が成立した場合のみ、相手方へ自動で支払う。成立しなければ何も起きない
-  - 指定できる条件は次の3種: (1) 指定した投票の少数派がYES（またはNO）になること (2) 指定した投票で特定のプレイヤーが少数派に入ること (3) 指定したラウンドで特定のプレイヤーが勝ち残ること
+  - 指定できる条件は次の4種: (1) 指定した投票の少数派がYES（またはNO）になること (2) 指定した投票で特定のプレイヤーが少数派に入ること (3) 指定したラウンドで特定のプレイヤーが勝ち残ること (4) 山分け（下記）
   - (1)(2)は、やり直しになった投票や行われなかった投票では不成立。(3)は、打ち切りのラウンドでは不成立
   - 金額は固定額で指定する。(3)で対象が義務者自身の場合に限り、「義務者がそのラウンドで受け取った山の何%」という割合でも指定できる
   - 割合の合計が100%を超える約束もできる。その場合、受け取った山より多くを支払うことになる
   - 条件の対象となるプレイヤーは、契約の当事者である必要はない（割合で指定する場合を除く）
   - 契約時点で支払額を所持している必要はない
-- 型Bの違約金と条件(1)(2)の支払いは、その投票の決済で行われる。型Aと条件(3)の支払いは、ラウンドの終わりの決済で行われる
+  - (1)(2)(3)の対象には、今の投票・ラウンドだけでなく、それより後の投票・ラウンドも指定できる
+- 山分け（型Cの条件(4)）: 当事者の誰かがラウンドの終わりに山を受け取ったら、その人は受取額のX%を、ほかの当事者の人数で等分して、それぞれに自動で払う
+  - Xは1〜100の整数で、当事者全員に同じXを当てる。当事者は2人以上で、人数の上限はない
+  - 成立したラウンドから最終ラウンドまで、毎ラウンド効く。成立したラウンドの山も対象になる
+  - 退場している当事者も分け前を受け取る
+  - 対象は山の受け取りだけである。契約・送金・山分けで受け取ったお金は、さらに山分けされない
+  - 1つの契約に山分けは1本まで。同じ人が複数の山分けに入ってもよく、それぞれを同じ受取額から別々に計算する。Xの合計が100を超えると、受取額より多く払うことになる
+  - 成立した山分けから抜けることはできない
+- 型Bの違約金と条件(1)(2)の支払いは、その投票の決済で行われる。型Aと条件(3)(4)の支払いは、ラウンドの終わりの決済で行われる
 - 型A・型C・違約金のいずれも、現金が足りなければ不足分は開始後の借金になる
 - 支払える上限は、その決済の時点の現金＋残り借入枠である（ラウンドの終わりの決済では、山を受け取った後の現金）。同じ決済で契約から受け取る予定のお金は、支払いの元手にできない
 - 同じ決済で複数の支払いがあり払いきれない場合は、契約が成立した順に支払われる（同じ契約の中では記載順）。途中で尽きた義務は残額だけ支払われ、それより後の義務は0円になる
@@ -153,7 +160,7 @@ RULES_TEMPLATE = """# 少数決 ルール
 3. Commit: 残っている人がYESかNOを秘密提出
 4. Settlement: 票の公開 → 判定（退場、または延長料）→ 型Bの監査 → 型Cの条件判定 → 契約の支払い → 公示
 5. 振り返り: 全員（退場者を含む）が、引き継ぎのメモを書き直す。ラウンドの最後の投票では、ラウンドの終わりの処理の後に行う
-ラウンドの終わり: 山の支払い（打ち切りなら持ち越し）→ 勝ち残りを条件にした型Cと型Aの支払い → 公示 → 利息の計上
+ラウンドの終わり: 山の支払い（打ち切りなら持ち越し）→ 勝ち残りを条件にした型C・山分け・型Aの支払い → 公示 → 利息の計上
 提示される記録: このラウンドのこれまでの投票の結果（全員の票、退場者、公示）、これまでのラウンドの結果、このラウンドの各巡で成立した契約の本数は、手番のたびに提示される
 会話の記録: その投票の交渉での会話（全体発言と、自分が当事者のDM）は、手番のたびに提示される。投票が変わると前の投票の会話は提示されず、振り返りで自分が書いたメモ1枚（1,000字以内で書く。1,500字を超えた分は切り捨てられる）だけが引き継がれる。メモを書き直せるのは、振り返りのときだけである。1回の手番の文面は15,000字までで、超える場合は、その投票の会話が古い発言から省かれ、省かれた件数が示される
 お金の出入りの記録: 自分の参加費・延長料・送金・返済・契約の支払いと受け取り（約束した額と実際に払われた額）・山の受け取り・利息は、本人にだけ、手番のたびに提示される。自分が当事者の契約は、義務ごとに、これからの義務か、済んだ義務かが示される。前のラウンドまでにすべての義務が済んだ契約は示されない
@@ -189,12 +196,14 @@ vote_plan には、今の投票で入れるつもりの側を書く。
     {{"obligor": "自分のID", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 2, "vote_num": 1,
       "details": {{"amount": 500000, "condition_type": "minority_side", "condition": {{"side": "YES"}}}}}},
     {{"obligor": "自分のID", "counterparty": "P07", "ob_type": "type_c_conditional", "round_num": 2,
-      "details": {{"share_percent": 25, "condition_type": "wins_round", "condition": {{"target_player": "自分のID"}}}}}}
+      "details": {{"share_percent": 25, "condition_type": "wins_round", "condition": {{"target_player": "自分のID"}}}}}},
+    {{"ob_type": "type_c_conditional", "details": {{"share_percent": 60, "condition_type": "pool_share"}}}}
   ]}}
   ※ob_type: type_a_payment(金銭支払) / type_b_vote(投票指定) / type_c_conditional(条件付き金銭)
-  ※condition_type: minority_side は side(YES/NO)、in_minority と wins_round は target_player を condition に指定
-  ※type_b_vote と minority_side・in_minority は round_num と vote_num を指定する。type_a_payment と wins_round は round_num だけを指定する
-  ※金額は amount（円）で指定する。wins_round で target_player が義務者自身の場合に限り、amount の代わりに share_percent（1〜100の整数）を指定できる
+  ※condition_type: minority_side は side(YES/NO)、in_minority と wins_round は target_player を condition に指定。pool_share は condition を書かない
+  ※type_b_vote と minority_side・in_minority は round_num と vote_num を指定する。type_a_payment と wins_round は round_num だけを指定する。round_num と vote_num には、今より後のラウンド・投票も指定できる
+  ※pool_share は obligor・counterparty・round_num・vote_num を書かない。当事者全員が対象になる
+  ※金額は amount（円）で指定する。wins_round で target_player が義務者自身の場合に限り、amount の代わりに share_percent（1〜100の整数）を指定できる。pool_share は share_percent だけを指定する
   ※with には、自分以外の当事者を重複なく書く。提案者は自動で当事者になる
 - {{"type": "contract_sign", "contract_id": "..."}}
 
@@ -438,6 +447,30 @@ def _render_obligations_due_lines(obligations_due: list[dict[str, Any]], config:
     return lines
 
 
+def _render_my_pool_shares_lines(pool_shares: list[dict[str, Any]], config: GameConfig) -> list[str]:
+    """
+    財務通知の「あなたが当事者の山分け」欄（§6.4/§7.5、サイクル5.0新設）
+
+    山分けは義務者を持たないため、_render_obligations_due_linesの
+    「義務者が自分の義務」の絞り込みには乗らない（engine/game.py
+    ::_build_my_financeのコメント参照）。当事者・割合・効く期間を示す。
+    """
+    if not pool_shares:
+        return ["  あなたが当事者の山分け: なし"]
+    lines = ["  あなたが当事者の山分け:"]
+    for ps in pool_shares:
+        others = "、".join(ps.get("other_parties") or [])
+        round_established = ps.get("round_established")
+        period = (
+            f"R{round_established}〜R{config.num_rounds}"
+            if round_established is not None else "成立後〜最終ラウンド"
+        )
+        lines.append(
+            f"    - ほかの当事者: {others}（割合{ps.get('share_percent')}%、効く期間: {period}）"
+        )
+    return lines
+
+
 def _render_my_finance_block(
     visible_state: dict[str, Any], config: GameConfig,
     *, is_round_end: bool = False, is_final_round: bool = False,
@@ -471,6 +504,7 @@ def _render_my_finance_block(
         interest_line,
     ])
     lines.extend(_render_obligations_due_lines(fin.get("obligations_due") or [], config))
+    lines.extend(_render_my_pool_shares_lines(fin.get("my_pool_shares") or [], config))
     rank = visible_state.get("my_rank")
     if rank:
         label = f"同率{rank['rank']}位" if rank.get("tied") else f"{rank['rank']}位"
@@ -597,6 +631,28 @@ def _payment_chunk(target: str, amount_text: str, *, form: str) -> str:
     return f" {target}へ{amount_text}支払う義務"
 
 
+def _pool_share_clause(ob: dict[str, Any], *, form: str) -> str:
+    """
+    山分け（pool_share）を1文にする（§6.4・§9、サイクル5.0新設）。
+
+    ほかの型Cと違い、義務者・相手方の単一の組を持たない（当事者全員が
+    義務者であり相手方でもある、§6.1）ため、_obligation_clauseの共通部分
+    （subject/target/_payment_chunk）には乗せず、ここで専用の文を組む。
+    当事者一覧はob["parties"]（契約の当事者。engine/game.py側で
+    obligor/counterpartyと同じ場所に付与）から読む。
+    """
+    d = ob.get("details") or {}
+    share_percent = d.get("share_percent", 0)
+    parties = ob.get("parties") or []
+    parties_desc = "、".join(parties) if parties else "当事者"
+    tail = "支払わなければならない" if form == "must" else "支払う義務"
+    return (
+        f"山分け（当事者: {parties_desc}。割合{share_percent}%）: "
+        f"当事者の誰かが山を受け取ったら、その人はほかの当事者それぞれへ、"
+        f"受取額の{share_percent}%を人数で等分して{tail}"
+    )
+
+
 def _obligation_clause(ob: dict[str, Any], *, is_mine: bool, config: GameConfig, form: str) -> str:
     """
     義務1件を1文にする唯一の部品（§7.5・§9「自分の義務は『あなたは…』の形」）。
@@ -608,10 +664,17 @@ def _obligation_clause(ob: dict[str, Any], *, is_mine: bool, config: GameConfig,
     1本だけ置き、`_obligation_fact_sentence`（これから）と
     `_obligation_status_sentence`（それ以外の状態）の両方がこれを呼ぶ
     （CLAUDE.md落とし穴④: 同じ内容を2か所で別々に組み立てない）。
+
+    山分け（pool_share）はobligor/counterparty/round_numを持たないため
+    （§6.4）、ほかの型の共通部分（subject/label等）を組む前に分岐して
+    `_pool_share_clause`に委ねる。
     """
-    subject = "あなたは" if is_mine else f"{ob['obligor']}は"
     ob_type = ob["ob_type"]
     d = ob.get("details") or {}
+    if ob_type == "type_c_conditional" and d.get("condition_type") == "pool_share":
+        return _pool_share_clause(ob, form=form)
+
+    subject = "あなたは" if is_mine else f"{ob['obligor']}は"
     rn, vn = ob["round_num"], ob.get("vote_num")
     label = f"R{rn}V{vn}" if vn is not None else f"R{rn}"
 
@@ -792,13 +855,23 @@ def _render_cash_flow_entry_line(e: dict[str, Any]) -> str:
     if kind == "repayment":
         return f"返済: 出金 {yen(e['amount'])}（開始後の借金 {_signed_yen(e['debt_delta'])}）"
     if kind == "contract_payment_paid":
+        # 山分け（pool_share）の支払いは、ほかの型Cと見分けられるよう
+        # 「山分け」と明記する（サイクル5.0。それ以外は既存のまま）
+        prefix = (
+            f"山分け（{e['contract_id']}）の支払い"
+            if e.get("condition_type") == "pool_share" else f"契約{e['contract_id']}の支払い"
+        )
         return (
-            f"契約{e['contract_id']}の支払い を {e['counterparty']}へ: 出金 {yen(e['paid'])}"
+            f"{prefix} を {e['counterparty']}へ: 出金 {yen(e['paid'])}"
             f"（約束 {yen(e['promised'])} / 実際 {yen(e['paid'])}）"
         )
     if kind == "contract_payment_received":
+        prefix = (
+            f"山分け（{e['contract_id']}）の受け取り"
+            if e.get("condition_type") == "pool_share" else f"契約{e['contract_id']}の受け取り"
+        )
         return (
-            f"契約{e['contract_id']}の受け取り を {e['counterparty']}から: 入金 {yen(e['paid'])}"
+            f"{prefix} を {e['counterparty']}から: 入金 {yen(e['paid'])}"
             f"（約束 {yen(e['promised'])} / 実際 {yen(e['paid'])}）"
         )
     if kind == "settlement_borrowing":

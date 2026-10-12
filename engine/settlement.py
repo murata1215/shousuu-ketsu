@@ -21,8 +21,9 @@ from typing import Literal
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.models import (
-    CashMovement, Contract, ContractSettlementReport, LedgerEntryKind, ObligationOutcome,
-    ObligationPayment, ObligationStatus, ObligationType, PlayerState, RoundOutcome, VoteOutcome, Vote,
+    CashMovement, ConditionType, Contract, ContractSettlementReport, LedgerEntryKind, Obligation,
+    ObligationOutcome, ObligationPayment, ObligationStatus, ObligationType, PlayerState, RoundOutcome,
+    VoteOutcome, Vote,
 )
 from engine import contracts as contract_ops
 from engine import player as player_ops
@@ -187,7 +188,7 @@ def _outcome_from_payment(
         obligation_id=item.obligation_id, contract_id=item.contract_id,
         contract_seq=item.contract_seq, ob_index=item.ob_index,
         obligor=item.obligor, counterparty=item.counterparty, ob_type=item.ob_type,
-        round_num=round_num, vote_num=vote_num, status=status,
+        round_num=round_num, vote_num=vote_num, status=status, condition_type=item.condition_type,
         promised=item.promised, paid=item.paid, settlement_scope=scope,
     )
 
@@ -260,6 +261,7 @@ def _collect_vote_due_items(
             if ob.round_num != round_num or ob.vote_num != vote_num:
                 continue
 
+            condition_type = None
             if ob.ob_type == ObligationType.TYPE_B_VOTE:
                 status = type_b_status_by_id[ob.obligation_id]
                 if status != ObligationStatus.TYPE_B_VIOLATED:
@@ -273,12 +275,13 @@ def _collect_vote_due_items(
                     continue
                 amount = config.penalty_amount
             elif ob.ob_type == ObligationType.TYPE_C_CONDITIONAL:
+                condition_type = ob.details.get("condition_type")
                 if not contract_ops.evaluate_type_c_vote_condition(ob, outcome):
                     non_payable.append(ObligationOutcome(
                         obligation_id=ob.obligation_id, contract_id=contract.contract_id,
                         contract_seq=contract.contract_seq, ob_index=ob_index,
                         obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
-                        round_num=ob.round_num, vote_num=ob.vote_num,
+                        round_num=ob.round_num, vote_num=ob.vote_num, condition_type=condition_type,
                         status=ObligationStatus.CONDITION_UNMET, settlement_scope="vote",
                     ))
                     continue
@@ -294,6 +297,7 @@ def _collect_vote_due_items(
                 obligor=ob.obligor,
                 counterparty=ob.counterparty,
                 ob_type=ob.ob_type,
+                condition_type=condition_type,
                 promised=amount,
                 paid=0,
             ))
@@ -400,6 +404,7 @@ def settle_vote(
                 "contract_id": item.contract_id, "contract_seq": item.contract_seq,
                 "ob_index": item.ob_index, "obligor": item.obligor,
                 "counterparty": item.counterparty, "ob_type": item.ob_type.value,
+                "condition_type": item.condition_type,
                 "promised": item.promised, "paid": item.paid,
             },
         )
@@ -443,6 +448,41 @@ def settle_vote(
 # ラウンドの精算（§7.4）
 # =============================================================================
 
+def _pool_share_payments(
+    contract: Contract, ob_index: int, ob: Obligation, round_num: int,
+    winner_ids: list[str], payout_per_winner: int,
+) -> list[ObligationPayment]:
+    """
+    山分け（pool_share）の支払いを組み立てる（§6.4/§7.4手順2、v0.5新設）
+
+    効いていなければ（成立前のラウンド）何も返さない。打ち切り
+    （winner_ids空・payout_per_winner=0）でも自然に空になる（§6.4）。
+    当事者のうち山を受け取った人ごとに、ほかの当事者それぞれへの支払いを
+    作る。並び順は契約の当事者の並び（提案者、withの順）→払う人ごとに
+    ほかの当事者の並び（§6.4「支払いの順番は…当事者の並び」）。
+    """
+    if not contract_ops.pool_share_in_effect(contract, round_num):
+        return []
+    share_percent = ob.details.get("share_percent", 0)
+    parties = list(contract.parties)
+    per_other = contract_ops.pool_share_fan_out_amount(share_percent, len(parties), payout_per_winner)
+    payments: list[ObligationPayment] = []
+    for payer in parties:
+        if payer not in winner_ids:
+            continue
+        for other in parties:
+            if other == payer:
+                continue
+            payments.append(ObligationPayment(
+                obligation_id=ob.obligation_id, contract_id=contract.contract_id,
+                contract_seq=contract.contract_seq, ob_index=ob_index,
+                obligor=payer, counterparty=other, ob_type=ob.ob_type,
+                condition_type=ConditionType.POOL_SHARE.value,
+                promised=per_other, paid=0,
+            ))
+    return payments
+
+
 def _collect_round_due_items(
     contracts: list[Contract],
     round_num: int,
@@ -450,29 +490,46 @@ def _collect_round_due_items(
     payout_per_winner: int,
 ) -> tuple[list[ObligationPayment], list[ObligationOutcome]]:
     """
-    手順2（型Cのラウンド単位条件判定）・手順3（型Aの追加）: このラウンドの
-    支払い対象になる義務を集める（§7.4手順2/3）
+    手順2（型Cのラウンド単位条件判定・山分けの展開）・手順3（型Aの追加）:
+    このラウンドの支払い対象になる義務を集める（§7.4手順2/3）
 
     サイクル4.2c: 2つめの戻り値として、成立しなかった型Cの条件判定も
     ObligationOutcome(CONDITION_UNMET)で返す（§7.5用）。型A義務は常に
     支払い対象になるため、ここには出ない。
+
+    サイクル5.0: 山分け（pool_share）は、ほかの型Cと違い
+    round_num/vote_numを持たず毎ラウンド効くため、このループの先頭で
+    別扱いする（§6.4）。「条件が成立しなかった」の記録は作らない
+    （山分けは毎ラウンド評価される前提の義務で、1つのobligation_idに対して
+    1件しか残らないObligationOutcomeの仕組みでは「済んだ／不成立」の
+    単発表示に意味がないため。当事者への表示は常にPENDING扱いにして
+    _build_my_financeから別に案内し、実際の支払い・受け取りはお金の
+    出入りの記録に残す。engine/models.py::Obligationのdocstring参照）。
     """
     items: list[ObligationPayment] = []
     non_payable: list[ObligationOutcome] = []
     for contract in _sorted_active_contracts(contracts):
         for ob_index, ob in enumerate(contract.obligations):
+            if contract_ops.is_pool_share_obligation(ob):
+                items.extend(_pool_share_payments(
+                    contract, ob_index, ob, round_num, winner_ids, payout_per_winner,
+                ))
+                continue
+
             if ob.round_num != round_num or ob.vote_num is not None:
                 continue
 
             if ob.ob_type == ObligationType.TYPE_A_PAYMENT:
                 amount = ob.details.get("amount", 0)
+                condition_type = None
             elif ob.ob_type == ObligationType.TYPE_C_CONDITIONAL:
+                condition_type = ob.details.get("condition_type")
                 if not contract_ops.evaluate_type_c_round_condition(ob, winner_ids):
                     non_payable.append(ObligationOutcome(
                         obligation_id=ob.obligation_id, contract_id=contract.contract_id,
                         contract_seq=contract.contract_seq, ob_index=ob_index,
                         obligor=ob.obligor, counterparty=ob.counterparty, ob_type=ob.ob_type,
-                        round_num=ob.round_num, vote_num=None,
+                        round_num=ob.round_num, vote_num=None, condition_type=condition_type,
                         status=ObligationStatus.CONDITION_UNMET, settlement_scope="round",
                     ))
                     continue
@@ -488,6 +545,7 @@ def _collect_round_due_items(
                 obligor=ob.obligor,
                 counterparty=ob.counterparty,
                 ob_type=ob.ob_type,
+                condition_type=condition_type,
                 promised=amount,
                 paid=0,
             ))
@@ -587,6 +645,7 @@ def settle_round(
                 "contract_id": item.contract_id, "contract_seq": item.contract_seq,
                 "ob_index": item.ob_index, "obligor": item.obligor,
                 "counterparty": item.counterparty, "ob_type": item.ob_type.value,
+                "condition_type": item.condition_type,
                 "promised": item.promised, "paid": item.paid,
             },
         )

@@ -10,8 +10,8 @@ gentei-jankenの`doc/viewer_operations.md`と同じ方式（systemd user service
 | 常駐方式 | `uso8m` ユーザーのsystemd user service |
 | service名 | `shousuu-viewer.service` |
 | unit | `~/.config/systemd/user/shousuu-viewer.service` |
-| working directory | `/home/uso8m/shousuu-ketsu` |
-| ExecStart | `/home/uso8m/shousuu-ketsu/.venv/bin/python -c "from viewer.server import main; main()"` |
+| working directory | `~/shousuu-ketsu` |
+| ExecStart | `~/shousuu-ketsu/.venv/bin/python -c "from viewer.server import main; main()"` |
 | Viewer bind | `127.0.0.1:9028` |
 | 公開経路（人間の作業が必要） | Caddy: `shousuu-ketsu-viewer.devrelay.io` → `localhost:9028`（未設定） |
 

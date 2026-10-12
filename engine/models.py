@@ -26,7 +26,7 @@ ContractCancelAction・発行料は持ち込まない（本作に脱落・取り
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 
 
 class Vote(str, Enum):
@@ -205,6 +205,11 @@ class ConditionType(str, Enum):
     """指定したラウンドで特定のプレイヤーが勝ち残る（ラウンドの精算で判定、§7.4）。
     v0.4で新設（v0.3との違い、§1.2）"""
 
+    POOL_SHARE = "pool_share"
+    """山分け。当事者の誰かが山を受け取ったら、受取額のX%をほかの当事者で
+    等分して払う（ラウンドの精算で判定、§7.4）。成立したラウンドから
+    最終ラウンドまで、毎ラウンド効く。v0.5で新設（§6.4/§11.10）"""
+
 
 class Obligation(BaseModel):
     """
@@ -216,6 +221,17 @@ class Obligation(BaseModel):
     状態フラグを持つ必要がない（CLAUDE.md 過去の落とし穴③: 使わない状態を
     持ち越して孤児化させない）。
 
+    山分け（pool_share）だけは例外で、obligor・counterparty・round_numを
+    持たない（当事者全員が義務者であり相手方でもあるため）。かつ、1つの
+    義務が複数ラウンドの精算で繰り返し判定される最初の例である（§6.4:
+    成立したラウンドから最終ラウンドまで毎ラウンド効く）。義務の中身
+    （1行だけ、当事者とXを持つ）はcreate_contractの時点で確定し、実際に
+    誰が誰にいくら払うかはラウンドの精算のたびに計算する
+    （engine/contracts.py::pool_share_obligations_in_effect/
+    pool_share_fan_out。サイクル5.0で「成立時に当事者の組×残りラウンド数だけ
+    展開する」案より、この「精算のときに計算する」案を採った。見せる契約の
+    中身が人数×ラウンド数で膨らまず、読める形を保てるため）。
+
     対象の指定（§9.3/§6.2/§6.4）:
     - 型A（type_a_payment）: round_num のみ（vote_num=None）。そのラウンドの
       終わりの精算（§7.4）で支払う。
@@ -224,6 +240,8 @@ class Obligation(BaseModel):
     - 型C（type_c_conditional）:
       - minority_side / in_minority: round_num + vote_num（§7.3で判定）
       - wins_round: round_num のみ、vote_num=None（§7.4で判定）
+      - pool_share: obligor/counterparty/round_num/vote_numをすべて持たない
+        （§6.4/§9.3。当事者はcontract.partiesから読む）
 
     details の形（§9.3/§6.4）:
     - 型A: {"amount": int}
@@ -233,6 +251,8 @@ class Obligation(BaseModel):
                    "share_percent": int}（amountとshare_percentは排他。
            share_percentが使えるのはwins_roundでtarget_player==obligorの
            ときだけ、§6.4）
+           または {"condition_type": "pool_share", "share_percent": int}
+           （conditionを持たない。amountは使えない。§6.4/§9.3）
       condition_type="minority_side" は condition={"side": "YES"|"NO"}、
       condition_type="in_minority"/"wins_round" は
       condition={"target_player": str}
@@ -241,13 +261,43 @@ class Obligation(BaseModel):
 
     obligation_id: str
     contract_id: str
-    obligor: str
-    counterparty: str
+    obligor: str | None = None
+    """pool_shareのときだけNone（§6.4）。それ以外の型は必須"""
+    counterparty: str | None = None
+    """pool_shareのときだけNone（§6.4）。それ以外の型は必須"""
     ob_type: ObligationType
-    round_num: int
+    round_num: int | None = None
+    """pool_shareのときだけNone（§6.4）。それ以外の型は必須"""
     vote_num: int | None = None
-    """対象の投票番号（型Aとwins_roundはNone、§9.3）"""
+    """対象の投票番号（型A・wins_round・pool_shareはNone、§9.3）"""
     details: dict[str, Any]
+
+    @model_validator(mode="after")
+    def _check_pool_share_shape(self) -> "Obligation":
+        """
+        pool_shareのときだけobligor/counterparty/round_numが「なし」で、
+        それ以外の型では必須であることを確かめる（§6.1/§6.4/§9.3）。
+
+        形式の検査自体（提案を不成立にするかどうか）は
+        engine/contracts.py::validate_terms が担当する。ここはモデルの
+        内部不変条件（契約の作り方を間違えたらここで止まる）であり、
+        プレイヤーへの理由の通知はしない。
+        """
+        is_pool_share = (
+            self.ob_type == ObligationType.TYPE_C_CONDITIONAL
+            and self.details.get("condition_type") == ConditionType.POOL_SHARE.value
+        )
+        if is_pool_share:
+            if self.obligor is not None or self.counterparty is not None or self.round_num is not None:
+                raise ValueError(
+                    "pool_share obligations must not set obligor/counterparty/round_num (§6.4)"
+                )
+        else:
+            if self.obligor is None or self.counterparty is None or self.round_num is None:
+                raise ValueError(
+                    "non-pool_share obligations require obligor/counterparty/round_num"
+                )
+        return self
 
 
 class ContractStatus(str, Enum):
@@ -446,6 +496,11 @@ class ObligationPayment(BaseModel):
     paid: int
     """実際に支払われた額（0以上、promised以下）"""
 
+    condition_type: str | None = None
+    """型Cのときだけ条件の種類（minority_side/in_minority/wins_round/
+    pool_share）を持つ（サイクル5.0新設）。ほかの型CとpoolShareの支払いを
+    記録・文面で見分けるために使う。型A・型BはNone"""
+
 
 class LedgerEntryKind(str, Enum):
     """お金の出入りの記録の種別（§7.5・§8.2、サイクル4.2c新設）。1件 = 本人の
@@ -533,6 +588,9 @@ class CashFlowEntry(BaseModel):
     contract_seq: int | None = None
     obligation_id: str | None = None
     ob_type: ObligationType | None = None
+    condition_type: str | None = None
+    """型Cのときだけ条件の種類を持つ（サイクル5.0新設。pool_shareをほかの
+    型Cと見分けるため）"""
     settlement_scope: Literal["vote", "round"] | None = None
 
 
@@ -581,6 +639,8 @@ class ObligationOutcome(BaseModel):
     status: ObligationStatus
     promised: int = 0
     paid: int = 0
+    condition_type: str | None = None
+    """型Cのときだけ条件の種類を持つ（サイクル5.0新設）"""
     settlement_scope: Literal["vote", "round"]
 
 

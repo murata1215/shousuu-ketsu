@@ -198,9 +198,76 @@ def _strip_contract_id_prefix(contract_id: str) -> str:
     return stripped
 
 
+def _extract_all_json_objects(text: str) -> list[dict[str, Any]]:
+    """
+    テキスト中に現れる、トップレベルの{...}ペアをすべて左から順に取り出す
+    （JSONが2つ以上並ぶ壊れた応答の救済用、サイクル5.0新設）。
+
+    コードフェンスの対応はしない（extract_jsonの1〜2のパターンはここでは
+    見ない）。救済対象は、生のJSONを素で2つ並べて返す壊れ方
+    （本番の試合のdeepseek席で見つかった、§12.11「見つかった点」）だけに
+    絞るため。
+    """
+    objects: list[dict[str, Any]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        start = text.find("{", i)
+        if start < 0:
+            break
+        depth = 0
+        end = -1
+        for j in range(start, n):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end < 0:
+            break
+        parsed = _loads_json(text[start : end + 1])
+        if parsed is not None:
+            objects.append(parsed)
+        i = end + 1
+    return objects
+
+
+def _rescue_action_from_additional_json(text: str) -> dict[str, Any] | None:
+    """
+    JSONが2つ以上並ぶ壊れた応答から、行動（action）を救済する
+    （サイクル5.0、§12.11「見つかった点」）。
+
+    本番の試合で、deepseek席の無効な応答17件のうち6件がこの形だった:
+    最初の{...}に"strategy"だけがあり"action"も"type"も無いが、続けて
+    2つ目の{...}に行動が入っている（{"action": {...}}の形、または
+    {"type": ...}のように"action"で包まない形の両方があった）。
+
+    2つ目以降の候補が複数ある、またはどれも行動（"action"または"type"）を
+    持たない場合は救済しない（意図が一つに決まる場合だけ救う。取り違えの
+    余地がある応答まで救うと、意図しない行動を実行しかねないため）。
+    """
+    candidates = _extract_all_json_objects(text)
+    if len(candidates) < 2:
+        return None
+    action_candidates = [c for c in candidates[1:] if "action" in c or "type" in c]
+    if len(action_candidates) != 1:
+        return None
+    chosen = action_candidates[0]
+    return chosen.get("action", chosen)
+
+
 def parse_response(text: str, player_id: str, phase: str) -> tuple[dict[str, Any] | None, Action]:
     """
     §13.1のアクション形式 {"strategy": {...}, "action": {...}} を解析する
+
+    actionキーが見つからない場合、2段階の救済を試す（サイクル5.0、
+    §12.11「見つかった点」）: (1) テキスト中の2つ目以降のJSONに行動が
+    入っていればそれを使う（_rescue_action_from_additional_json）。
+    (2) commitフェイズに限り、strategy.vote_planがYES/NOのどちらかに
+    一意に決まればそれを投票として使う。どちらも意図が一つに決まる場合
+    だけ救済し、曖昧なら今までどおりParseErrorにする（聞き直しの機会を残す）。
 
     Args:
         text: LLMの生応答テキスト
@@ -211,7 +278,8 @@ def parse_response(text: str, player_id: str, phase: str) -> tuple[dict[str, Any
         (strategy辞書 または None, Action)
 
     Raises:
-        ParseError: JSON抽出失敗・actionキー欠落・action_type不正・必須フィールド欠落の場合
+        ParseError: JSON抽出失敗・actionキー欠落（救済も失敗）・action_type不正・
+            必須フィールド欠落の場合
     """
     data = extract_json(text)
     if data is None:
@@ -226,6 +294,18 @@ def parse_response(text: str, player_id: str, phase: str) -> tuple[dict[str, Any
         if "type" in data:
             action_data = data
         else:
+            action_data = _rescue_action_from_additional_json(text)
+        if action_data is None and phase == "commit" and isinstance(strategy, dict):
+            # サイクル5.0: 投票（Commit）で行動がどこにも無く、strategy.vote_plan
+            # がYES/NOのどちらかに一意に決まる場合だけ、その票として救済する
+            # （§13.1「vote_planには、今の投票で入れるつもりの側を書く」。
+            # 本番の試合でdeepseek席の無効な応答のうち4件がこの形で、いずれも
+            # AUTO COMMITの原因だった。交渉フェイズでは行動の推測になるため
+            # 救済しない）
+            vote_plan = str(strategy.get("vote_plan", "")).strip().upper()
+            if vote_plan in ("YES", "NO"):
+                action_data = {"type": "vote_commit", "vote": vote_plan}
+        if action_data is None:
             raise ParseError(
                 "actionキーが見つかりません",
                 '回答に"action"キーを含めてください。例: {"strategy": {...}, "action": {"type": "pass"}}',
@@ -285,6 +365,31 @@ def _validate_vote_num_if_present(i: int, term: dict[str, Any]) -> None:
         raise ParseError(
             f"terms[{i}]のvote_numが整数ではありません",
             "vote_numは1以上の整数で指定してください",
+        )
+
+
+def _validate_pool_share_term_shape(i: int, details: dict[str, Any]) -> None:
+    """
+    山分け（pool_share）termの形だけを検証する（§6.4/§9.3、v0.5新設）
+
+    obligor・counterparty・round_num・vote_num・conditionは読まない
+    （書かれていても無視して受け付ける。engine/contracts.py::validate_terms
+    と同じ方針、§9.3）。amountは使えず、share_percent（1〜100の整数）が必須。
+    1つの契約にpool_shareが2本以上かどうかは、ここ（parser層）には他のtermsの
+    文脈を見る理由がないため判定せず、engine/contracts.py::validate_terms に
+    委ねる。
+    """
+    if "amount" in details:
+        raise ParseError(
+            f"terms[{i}]のpool_shareにamountがあります",
+            "pool_shareはamountを指定できません。share_percentだけを指定してください",
+        )
+    share_percent = details.get("share_percent")
+    if not isinstance(share_percent, int) or isinstance(share_percent, bool) \
+            or not (1 <= share_percent <= 100):
+        raise ParseError(
+            f"terms[{i}]のpool_shareのshare_percentが不正: {share_percent!r}",
+            "share_percentは1〜100の整数である必要があります",
         )
 
 
@@ -447,6 +552,21 @@ def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
                     f"terms[{i}]が辞書ではありません",
                     "各termは{obligor, counterparty, ob_type, round_num, details}の辞書である必要があります",
                 )
+
+            # 山分け（pool_share、v0.5新設）: obligor・counterparty・round_num・
+            # vote_num・conditionを持たない（§9.3）。共通のrequired_keysより
+            # 前で分岐し、そちらには進ませない。1つの契約に2本以上かどうかは
+            # ゲームの状態（当事者一覧）を見ないここでは判定せず、
+            # engine/contracts.py::validate_termsに委ねる。
+            term_details = term.get("details")
+            if (
+                term.get("ob_type") == ObligationType.TYPE_C_CONDITIONAL.value
+                and isinstance(term_details, dict)
+                and term_details.get("condition_type") == ConditionType.POOL_SHARE.value
+            ):
+                _validate_pool_share_term_shape(i, term_details)
+                continue
+
             missing = required_keys - set(term.keys())
             if missing:
                 raise ParseError(

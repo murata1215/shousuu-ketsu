@@ -114,7 +114,7 @@ _TERM_REASON_JA: dict[str, str] = {
     ),
     TermRejectReason.CONDITION_TYPE_INVALID.value: (
         "{index}本目の型Cの condition_type が{value}でした。"
-        "指定できるのは minority_side / in_minority / wins_round です。"
+        "指定できるのは minority_side / in_minority / wins_round / pool_share です。"
     ),
     TermRejectReason.WINS_ROUND_WITH_VOTE_NUM.value: (
         "{index}本目の wins_round に vote_num が付いていました。"
@@ -141,7 +141,8 @@ _TERM_REASON_JA: dict[str, str] = {
     ),
     TermRejectReason.SHARE_PERCENT_ONLY_WINS_ROUND.value: (
         "{index}本目で share_percent を{condition_type}に使っていました。"
-        "割合で指定できるのは wins_round だけです。"
+        "割合で指定できるのは wins_round（義務者自身が対象の場合）と "
+        "pool_share だけです。"
     ),
     TermRejectReason.TYPE_C_AMOUNT_NOT_POSITIVE.value: (
         "{index}本目の型Cの amount が{value}でした。1円以上の整数で指定してください。"
@@ -160,6 +161,18 @@ _TERM_REASON_JA: dict[str, str] = {
     TermRejectReason.UNKNOWN_OB_TYPE.value: (
         "{index}本目の ob_type が{value}でした。"
         "使えるのは type_a_payment / type_b_vote / type_c_conditional です。"
+    ),
+    TermRejectReason.POOL_SHARE_AMOUNT_NOT_ALLOWED.value: (
+        "{index}本目の山分け（pool_share）に amount がありました。"
+        "山分けは amount を指定できません。share_percent だけを指定してください。"
+    ),
+    TermRejectReason.POOL_SHARE_SHARE_PERCENT_MISSING.value: (
+        "{index}本目の山分け（pool_share）に share_percent がありませんでした。"
+        "1〜100の整数で指定してください。"
+    ),
+    TermRejectReason.POOL_SHARE_DUPLICATED.value: (
+        "1つの契約に山分け（pool_share）が2本以上ありました。"
+        "1つの契約に山分けは1本までです。"
     ),
 }
 

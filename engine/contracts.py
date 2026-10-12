@@ -24,6 +24,16 @@ v0.3の `engine/contracts.py`（dangou-card流用のB分類を少数決向けに
 
 契約IDは乱数で生成する（GameRng経由。同一seedで再現、§8: 未成立の
 提案件数が連番から推測できないようにするため連番にしない）。
+
+サイクル5.0（v0.5）で型Cに4つ目の条件 `pool_share`（山分け）を追加した。
+pool_shareはobligor/counterparty/round_num/vote_num/conditionを一切持たず
+（details に share_percent と condition_type だけ）、1つの契約に1本までで、
+成立したラウンドから最終ラウンドまで毎ラウンド効く（§6.4）。実際に誰が
+誰にいくら払うかは、成立時にではなく、ラウンドの精算のたびに計算する
+（`pool_share_obligations_in_effect`/`pool_share_fan_out_amount`。
+engine/models.py::Obligationのdocstring参照）。validate_termsはpool_shareの
+termを共通の当事者チェックより前に分岐させ、obligor等が書かれていても
+読まずに受け付ける（§9.3）。
 """
 
 from enum import Enum
@@ -68,6 +78,12 @@ class TermRejectReason(str, Enum):
     SHARE_PERCENT_TARGET_NOT_SELF = "share_percent_target_not_self"
     SHARE_PERCENT_OUT_OF_RANGE = "share_percent_out_of_range"
     UNKNOWN_OB_TYPE = "unknown_ob_type"
+    POOL_SHARE_AMOUNT_NOT_ALLOWED = "pool_share_amount_not_allowed"
+    """山分け（v0.5新設、§6.4）: amountは使えない"""
+    POOL_SHARE_SHARE_PERCENT_MISSING = "pool_share_share_percent_missing"
+    """山分け（v0.5新設、§6.4）: share_percentが必須"""
+    POOL_SHARE_DUPLICATED = "pool_share_duplicated"
+    """山分け（v0.5新設、§6.4）: 1つの契約に2本以上は不成立"""
 
 
 class TermRejection(NamedTuple):
@@ -112,13 +128,17 @@ def create_contract(
     """
     obligations: list[Obligation] = []
     for i, term in enumerate(terms):
+        # pool_share（山分け）はobligor/counterparty/round_numを持たない
+        # （§6.4/§9.3）。validate_termsで検証済みのtermだけが渡される前提
+        # なので、通常の型はこれまでどおり必須キーの直接添字アクセスのまま
+        # （キー不足ならKeyErrorで気づける）。
         obligations.append(Obligation(
             obligation_id=f"{contract_id}_OB{i + 1:02d}",
             contract_id=contract_id,
-            obligor=term["obligor"],
-            counterparty=term["counterparty"],
+            obligor=term.get("obligor"),
+            counterparty=term.get("counterparty"),
             ob_type=ObligationType(term["ob_type"]),
-            round_num=term["round_num"],
+            round_num=term.get("round_num"),
             vote_num=term.get("vote_num"),
             details=dict(term.get("details", {})),
         ))
@@ -343,6 +363,80 @@ def resolve_type_c_amount(ob: Obligation, *, payout_per_winner: int = 0) -> int:
     return ob.details.get("amount", 0)
 
 
+def _sorted_active_contracts(contracts: list[Contract]) -> list[Contract]:
+    """
+    ACTIVE契約をcontract_seq昇順で返す（成立順、§6.1/§7.4）
+
+    engine/settlement.py::_sorted_active_contracts と同じ定義だが、
+    settlement.pyがcontracts.pyをimportしている（逆向きにするとcircular
+    importになる）ためここに複製する。中身は1行で、どちらかだけ直す
+    事故が起きても目視で気づける大きさに留める（CLAUDE.md過去の落とし穴④）。
+    """
+    return sorted(
+        (c for c in contracts if c.status == ContractStatus.ACTIVE and c.contract_seq is not None),
+        key=lambda c: c.contract_seq,
+    )
+
+
+def is_pool_share_obligation(ob: Obligation) -> bool:
+    """この義務が山分け（pool_share）かどうか（§6.4、v0.5新設）"""
+    return (
+        ob.ob_type == ObligationType.TYPE_C_CONDITIONAL
+        and ob.details.get("condition_type") == ConditionType.POOL_SHARE.value
+    )
+
+
+def pool_share_in_effect(contract: Contract, round_num: int) -> bool:
+    """
+    山分けが指定ラウンドで効いているか（§6.4: 成立したラウンドから
+    最終ラウンドまで、毎ラウンド効く。成立したラウンドの山も対象）
+
+    未成立（round_establishedがNone）の契約は対象外。
+    """
+    return contract.round_established is not None and contract.round_established <= round_num
+
+
+def pool_share_obligations_in_effect(
+    contracts: list[Contract], round_num: int,
+) -> list[tuple[Contract, int, Obligation]]:
+    """
+    指定ラウンドで効いている山分け義務を (contract, ob_index, obligation) の
+    形で、契約の成立順（contract_seq昇順）に返す（§6.4/§7.4手順2・§7.5）
+
+    ラウンドの精算（settle_round）での支払いの組み立てと、本人向け財務通知
+    （_build_my_finance）の両方がこの1本を使う（「効いている」の判定を
+    2か所に書かない、CLAUDE.md過去の落とし穴④）。
+    """
+    result: list[tuple[Contract, int, Obligation]] = []
+    for contract in _sorted_active_contracts(contracts):
+        if not pool_share_in_effect(contract, round_num):
+            continue
+        for ob_index, ob in enumerate(contract.obligations):
+            if is_pool_share_obligation(ob):
+                result.append((contract, ob_index, ob))
+    return result
+
+
+def pool_share_fan_out_amount(share_percent: int, num_parties: int, payout_per_winner: int) -> int:
+    """
+    山分けで、山を受け取った1人が、ほかの当事者1人あたりに払う額を計算する
+    （§6.4: 受取額 × X ÷ 100 ÷（当事者数 − 1）、1円未満切り捨て。
+    受け入れ#76参照）
+
+    Args:
+        share_percent: 契約で決めたX（1〜100）
+        num_parties: その契約の当事者の人数（当事者は2人以上）
+        payout_per_winner: 受け取った山の額
+
+    Returns:
+        ほかの当事者1人あたりへの支払額（円）
+    """
+    if num_parties <= 1:
+        return 0
+    total_share = payout_per_winner * share_percent // 100
+    return total_share // (num_parties - 1)
+
+
 def vote_constraint_for_vote(
     contracts: list[Contract],
     player_id: str,
@@ -428,6 +522,44 @@ def _validate_target_timing(
     return None
 
 
+def _validate_pool_share_term(i: int, details: dict[str, Any]) -> TermRejection | None:
+    """
+    山分け（pool_share）termの形だけを検証する（§6.4/§9.3、v0.5新設）
+
+    obligor・counterparty・round_num・vote_num・conditionは呼び出し側
+    （validate_terms）がすでに無視しているため、ここではdetailsの中の
+    share_percentとamountだけを見る。
+
+    Args:
+        i: 何本目の義務か（1始まり。§7.5の日本語文面用）
+        details: term["details"]（辞書であることは呼び出し側で確認済み）
+
+    Returns:
+        不正ならTermRejection、問題なければNone
+    """
+    if "amount" in details:
+        return TermRejection(
+            TermRejectReason.POOL_SHARE_AMOUNT_NOT_ALLOWED, {"index": i},
+            "pool_share must not specify amount (§6.4)",
+        )
+    share_percent = details.get("share_percent")
+    if share_percent is None:
+        return TermRejection(
+            TermRejectReason.POOL_SHARE_SHARE_PERCENT_MISSING, {"index": i},
+            "pool_share requires share_percent (§6.4)",
+        )
+    if (
+        not isinstance(share_percent, int)
+        or isinstance(share_percent, bool)
+        or not (1 <= share_percent <= 100)
+    ):
+        return TermRejection(
+            TermRejectReason.SHARE_PERCENT_OUT_OF_RANGE, {"index": i, "value": share_percent},
+            f"share_percent must be an int in 1..100, got {share_percent!r}",
+        )
+    return None
+
+
 def validate_terms(
     terms: list[dict[str, Any]],
     parties: set[str],
@@ -458,6 +590,18 @@ def validate_terms(
     if not terms:
         return TermRejection(TermRejectReason.TERMS_EMPTY, {}, "terms must not be empty")
 
+    pool_share_count = sum(
+        1 for term in terms
+        if term.get("ob_type") == ObligationType.TYPE_C_CONDITIONAL.value
+        and isinstance(term.get("details"), dict)
+        and term["details"].get("condition_type") == ConditionType.POOL_SHARE.value
+    )
+    if pool_share_count > 1:
+        return TermRejection(
+            TermRejectReason.POOL_SHARE_DUPLICATED, {},
+            "a contract may include at most one pool_share term (§6.4)",
+        )
+
     for i, term in enumerate(terms, start=1):
         obligor = term.get("obligor")
         counterparty = term.get("counterparty")
@@ -470,6 +614,18 @@ def validate_terms(
                 TermRejectReason.DETAILS_NOT_DICT, {"index": i, "value": details},
                 f"details must be a dict, got {details!r}",
             )
+
+        if (
+            ob_type == ObligationType.TYPE_C_CONDITIONAL.value
+            and details.get("condition_type") == ConditionType.POOL_SHARE.value
+        ):
+            # 山分け（pool_share）: obligor・counterparty・round_num・vote_num・
+            # conditionは書かれていても読まずに受け付ける（§9.3/受け入れ#78）。
+            # 共通の当事者チェックより前で分岐し、そちらには進ませない。
+            rejection = _validate_pool_share_term(i, details)
+            if rejection:
+                return rejection
+            continue
 
         if obligor not in parties:
             return TermRejection(
@@ -584,7 +740,7 @@ def validate_terms(
                     return TermRejection(
                         TermRejectReason.SHARE_PERCENT_ONLY_WINS_ROUND,
                         {"index": i, "condition_type": condition_type},
-                        "share_percent is only allowed for wins_round (§6.4)",
+                        "share_percent is only allowed for wins_round or pool_share (§6.4)",
                     )
                 if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
                     return TermRejection(
@@ -604,7 +760,7 @@ def validate_terms(
                     return TermRejection(
                         TermRejectReason.SHARE_PERCENT_ONLY_WINS_ROUND,
                         {"index": i, "condition_type": condition_type},
-                        "share_percent is only allowed for wins_round (§6.4)",
+                        "share_percent is only allowed for wins_round or pool_share (§6.4)",
                     )
                 if not isinstance(amount, int) or isinstance(amount, bool) or amount <= 0:
                     return TermRejection(

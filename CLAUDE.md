@@ -4,9 +4,9 @@
 
 ## ドキュメント
 
-- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_4_4.md`（v0.4.4。`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md`・`doc/..._v0_4.md`・`doc/..._v0_4_1.md`・`doc/..._v0_4_2.md`・`doc/..._v0_4_3.md` は履歴として残す。変更しない）。v0.4.4のルール変更はメモの切り捨て字数を1,000字→1,500字に変えた点のみ（2回目の12席試走の結果、§11.9）。サイクル4.2dで`llm/prompt_builder.py`・`tests/test_prompt_builder_rules.py`・`doc/analysis/acceptance_v0_4.md`を含め実装へ反映済み
+- 現行の仕様書: `doc/uso8000000_shousuu_ketsu_spec_v0_5.md`（v0.5。`doc/..._v0_1.md`・`doc/..._v0_2.md`・`doc/..._v0_3.md`・`doc/..._v0_4.md`・`doc/..._v0_4_1.md`・`doc/..._v0_4_2.md`・`doc/..._v0_4_3.md`・`doc/..._v0_4_4.md` は履歴として残す。変更しない）。v0.5のルール変更は型Cに4つ目の条件「山分け」（`pool_share`）を足した点と、ルール要約の書き足し（§13.1に既存の決まりの確認を1行）のみ（§11.10）。サイクル5.0で`llm/prompt_builder.py`・`tests/test_prompt_builder_rules.py`・`doc/analysis/acceptance_v0_5.md`を含め実装へ反映済み
 - 流用調査レポート: `doc/analysis/reuse_investigation.md`（サイクル0.1。`~/dangou-card`/`~/gentei-janken` からの流用方針・部品表・優劣・仕様書あいまい点16件・段取り案）
-- 受け入れテスト対応表: `doc/analysis/acceptance_v0_4.md`（サイクル4.0・4.1・4.2c・4.2d。仕様書v0.4.4 §12.3の68件とpytest関数の対応）
+- 受け入れテスト対応表: `doc/analysis/acceptance_v0_5.md`（サイクル4.0・4.1・4.2c・4.2d・5.0。仕様書v0.5 §12.3の78件とpytest関数の対応。v0.4.4までの68件分は`doc/analysis/acceptance_v0_4.md`として履歴に残す）
 - Bot検証レポート（v0.4）: `doc/analysis/bot_simulation_report_v0_4.md`（サイクル4.1。V1〜V10・机上計算との比較・暫定値を変えた場合の比較）
 
 ## v0.4: 「ラウンド」と「投票」は別の単位（サイクル4.0）
@@ -17,6 +17,18 @@ v0.4の**「ラウンド」**（`round_num`、1〜4）は、12人全員が参加
 `round` を使わないこと。精算も「投票の精算」（§7.3、`engine/settlement.py::settle_vote`）と
 「ラウンドの精算」（§7.4、`settle_round`）の2段に分かれている。イベントログは `round_num` と
 `vote_num` の両方を持つ（`engine/models.py::GameEvent`）。
+
+## v0.5: 型Cに4つ目の条件「山分け」（pool_share、サイクル5.0）
+
+本番の試合 `t12_r4_4401b` で型Cの義務26本のうち条件が成立したのは1本だけだったことを受け、
+型Cに `pool_share`（山分け）を足した。ほかの型Cと違い、`obligor`・`counterparty`・`round_num`・
+`vote_num` を一切持たない（当事者全員が義務者であり相手方でもあるため、`engine/models.py::Obligation`
+の docstring 参照）。実際の支払いは**成立時に展開せず、ラウンドの精算のたびに計算する**
+（`engine/contracts.py::pool_share_obligations_in_effect`/`pool_share_fan_out_amount`、
+`engine/settlement.py::_collect_round_due_items`）。当事者に見せる契約の表示は常に「これから
+（PENDING）」のままで、「済み」にはしない（1つの義務が複数ラウンド・複数の支払い相手にわたって
+評価されるため、`ObligationOutcome` の単一上書きの仕組みに乗らない。`engine/game.py::
+_obligation_status_view` 参照）。詳細は `doc/analysis/acceptance_v0_5.md` の注6。
 
 ## 他プロジェクトの扱い
 
@@ -34,6 +46,7 @@ v0.4の**「ラウンド」**（`round_num`、1〜4）は、12人全員が参加
 - 完了時に `doc/devlog/YYYY-MM-DD_HHMMSS.md` を1つ新規作成する（時刻は `TZ=Asia/Tokyo date '+%Y-%m-%d_%H%M%S'` の出力を使う）。
 - 冒頭は `# YYYY-MM-DD HH:MM JST ｜ サイクルX.Y: 見出し`。本文は 要求／実行／検証／発見 を平文3〜10行。数値は具体値で書く。
 - `doc/devlog/INDEX.md` の末尾に1行だけ追記する（`- YYYY-MM-DD_HHMMSS | サイクルX.Y | 見出し | 1行要約`）。`doc/devlog/` の一括catは禁止。
+- devlogに `Co-Authored-By` の行を書かない（サイクル4.2c・4.2dの2件で混入し、サイクル5.0で消した。コミットメッセージの属性行とは別物で、devlogは人間向けの記録のため不要）。`tests/test_devlog_no_coauthor.py` が機械的に固定する。
 
 ## テストの実行方法
 

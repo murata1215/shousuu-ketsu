@@ -486,7 +486,8 @@ class Game:
                 amount=item.paid, cash_delta=-item.paid, debt_delta=0,
                 promised=item.promised, paid=item.paid,
                 contract_id=item.contract_id, contract_seq=item.contract_seq,
-                obligation_id=item.obligation_id, ob_type=item.ob_type, settlement_scope=scope,
+                obligation_id=item.obligation_id, ob_type=item.ob_type,
+                condition_type=item.condition_type, settlement_scope=scope,
             ))
             self._record_cash_flow(item.counterparty, CashFlowEntry(
                 round_num=round_num, vote_num=vote_num, phase=phase,
@@ -494,7 +495,8 @@ class Game:
                 amount=item.paid, cash_delta=item.paid, debt_delta=0,
                 promised=item.promised, paid=item.paid,
                 contract_id=item.contract_id, contract_seq=item.contract_seq,
-                obligation_id=item.obligation_id, ob_type=item.ob_type, settlement_scope=scope,
+                obligation_id=item.obligation_id, ob_type=item.ob_type,
+                condition_type=item.condition_type, settlement_scope=scope,
             ))
         for mv in borrowing_movements:
             self._record_cash_flow(mv.player_id, CashFlowEntry(
@@ -1115,6 +1117,11 @@ class Game:
 
         現金・借金残高（2種別）・今ラウンドの利息見込み・残り借入枠・
         この投票とこのラウンドを対象にした自分の義務を含む。
+
+        山分け（pool_share、サイクル5.0）は義務者を持たず、
+        obligations_due()の「義務者が自分の義務」の絞り込みに乗らないため
+        （engine/contracts.py::obligations_dueはround_num一致で絞るが、
+        pool_shareのround_numは常にNone）、別枠（my_pool_shares）で足す。
         """
         me = self.players[player_id]
         interest_pre_forecast = -(
@@ -1138,6 +1145,18 @@ class Game:
         # 出さない（§7.5「済んだ義務を、これからの義務として示さない」。
         # サイクル4.2c）。済んだ義務の額は自分が当事者の契約の表示
         # （_contract_status_view）とお金の出入りの記録に残る。
+        my_pool_shares = [
+            {
+                "contract_id": contract.contract_id,
+                "other_parties": [p for p in contract.parties if p != player_id],
+                "share_percent": ob.details.get("share_percent"),
+                "round_established": contract.round_established,
+            }
+            for contract, _ob_index, ob in contract_ops.pool_share_obligations_in_effect(
+                self.contracts, round_num,
+            )
+            if player_id in contract.parties
+        ]
         pre_pct = self.config.interest_rate_pre_num / self.config.interest_rate_pre_den * 100
         return {
             "cash": me.cash,
@@ -1149,6 +1168,7 @@ class Game:
             "remaining_credit": player_ops.remaining_credit(me, self.config),
             "interest_forecast": interest_pre_forecast + interest_post_forecast,
             "obligations_due": obligations_due,
+            "my_pool_shares": my_pool_shares,
         }
 
     def _vote_result_view(self, outcome: VoteOutcome) -> dict[str, Any]:
@@ -1217,17 +1237,39 @@ class Game:
         ]
         return {"rounds": rounds, "totals": _cash_flow_totals(entries)}
 
-    def _obligation_status_view(self, ob: Obligation) -> dict[str, Any]:
+    def _obligation_status_view(self, ob: Obligation, parties: list[str]) -> dict[str, Any]:
         """
         1つの義務の状態を描く（§7.5）。状態はself._obligation_outcomesから
         読み出すだけで、ここでは一切判定しない（エンジンの精算結果が唯一の
         根拠。文面層・ビューアに判定を持ち込まない、サイクル4.2c）。
+
+        山分け（pool_share、サイクル5.0）だけは例外で、常にPENDINGとして
+        描く。ほかの義務と違い「1つの義務=1回の精算で1度だけ判定」ではなく
+        成立したラウンドから最終ラウンドまで毎ラウンド判定され続けるため、
+        self._obligation_outcomesには単一のobligation_idに対して複数回・
+        複数の支払い相手ぶんの結果が上書きで残り、最後の1件しか見えない
+        （どのラウンドの何番目の相手への支払いかが失われる）。済み／不成立の
+        単発表示はpool_shareには意味がなく、実際に動いた額はお金の出入りの
+        記録（_cash_flow_view）に残る（engine/settlement.py
+        ::_collect_round_due_itemsのコメント参照）。
+
+        Args:
+            ob: 対象の義務
+            parties: 義務が属する契約の当事者一覧（山分けの文面に使う。
+                型A・型B・ほかの型Cはobligor/counterpartyで足りるため使わない）
         """
         base = {
             "obligor": ob.obligor, "counterparty": ob.counterparty,
             "ob_type": ob.ob_type.value, "round_num": ob.round_num,
             "vote_num": ob.vote_num, "details": dict(ob.details),
+            "parties": list(parties),
         }
+        if contract_ops.is_pool_share_obligation(ob):
+            return {
+                **base, "status": ObligationStatus.PENDING.value,
+                "promised": None, "paid": None,
+                "settled_round_num": None, "settled_vote_num": None, "settlement_scope": None,
+            }
         outcome = self._obligation_outcomes.get(ob.obligation_id)
         if outcome is None:
             return {
@@ -1251,7 +1293,7 @@ class Game:
         前のラウンドまでに全義務が済んだ契約はNoneを返す（その支払いと
         受け取りはmy_cash_flowに残る、§11.8 #10）。
         """
-        obligations = [self._obligation_status_view(ob) for ob in c.obligations]
+        obligations = [self._obligation_status_view(ob, c.parties) for ob in c.obligations]
         established_this_round = c.round_established == round_num
         has_future = any(o["status"] == ObligationStatus.PENDING.value for o in obligations)
         if not (established_this_round or has_future):
@@ -1336,6 +1378,7 @@ class Game:
                         "obligor": ob.obligor, "counterparty": ob.counterparty,
                         "ob_type": ob.ob_type.value, "round_num": ob.round_num,
                         "vote_num": ob.vote_num, "details": dict(ob.details),
+                        "parties": list(c.parties),
                     }
                     for ob in c.obligations
                 ]

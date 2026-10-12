@@ -23,6 +23,7 @@ from typing import Any, Callable
 from bots.group_bot import GroupSplitBot, MultiGroupHubBot, SitInBot, TypeBPactGroupBot
 from bots.loan_bot import LoanFixedBot
 from bots.oversell_bot import OversellBot, SignerBot
+from bots.pool_share_bot import PoolShareGroupBot
 from bots.random_vote_bot import RandomVoteBot
 from engine.config import GameConfig
 from sim.recorder import RecordingAgent
@@ -205,6 +206,16 @@ def _v10(seed: int) -> dict[str, RecordingAgent]:
     return agents
 
 
+# ---------------------------------------------------------------------------
+# V11: 山分け（pool_share）を結ぶ4人組＋無作為8人（サイクル5.0新設）
+# ---------------------------------------------------------------------------
+
+def _v11(seed: int) -> dict[str, RecordingAgent]:
+    agents = _group_agents(seed, GROUP_A, PoolShareGroupBot, label="PoolShare")
+    agents.update(_random_fill(seed, used=set(GROUP_A)))
+    return agents
+
+
 @dataclass(frozen=True)
 class Scenario:
     key: str
@@ -265,6 +276,7 @@ SCENARIOS: dict[str, Scenario] = {
         "V9_post10", _v9, config_overrides={"interest_rate_post_num": 10}, note="開始後の利率10%",
     ),
     "V10": Scenario("V10", _v10, note="割合の重ね売り"),
+    "V11": Scenario("V11", _v11, note="山分け（pool_share）を結ぶ4人組1つ＋無作為8人"),
     "V1_ties2": Scenario("V1_ties2", _v1, config_overrides=_ties_overrides(2), note="連続回数2回"),
     "V1_ties5": Scenario("V1_ties5", _v1, config_overrides=_ties_overrides(5), note="連続回数5回"),
     "V5_ties2": Scenario("V5_ties2", _v5, config_overrides=_ties_overrides(2), note="連続回数2回"),

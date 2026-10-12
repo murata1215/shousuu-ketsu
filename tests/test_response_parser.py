@@ -276,6 +276,71 @@ def test_missing_action_key_raises_parse_error():
         parse_response(text, "P01", "negotiation")
 
 
+# --- サイクル5.0: JSONが2つ並ぶ壊れた応答の救済（§12.11「見つかった点」） ---
+
+def test_rescues_action_from_second_bare_type_json_block():
+    """最初の{...}がstrategyだけ、2つ目が{"type": ...}（actionで包まない形）"""
+    text = '{"strategy": {"vote_plan": "NO", "reason": "x", "emotion": "疑"}}\n\n{"type": "pass"}'
+    _, action = parse_response(text, "P04", "negotiation")
+    assert isinstance(action, PassAction)
+
+
+def test_rescues_action_from_second_wrapped_action_json_block():
+    """最初の{...}がstrategyだけ、2つ目が{"action": {...}}の形"""
+    text = (
+        '{"strategy": {"vote_plan": "", "reason": "x", "emotion": "疑"}}\n\n'
+        '{"action": {"type": "dm", "to": "P09", "message": "hi"}}'
+    )
+    _, action = parse_response(text, "P04", "negotiation")
+    assert isinstance(action, DmAction) and action.to == "P09"
+
+
+def test_does_not_rescue_when_no_second_json_block_present():
+    """2つ目の{...}が無ければ、今までどおりParseError（意図を推測しない）"""
+    text = '{"strategy": {"vote_plan": "NO", "reason": "x", "emotion": "疑"}}'
+    with pytest.raises(ParseError):
+        parse_response(text, "P04", "negotiation")
+
+
+def test_does_not_rescue_when_second_block_is_also_strategy_only():
+    """2つ目の{...}があっても行動（action/type）を持たなければ救済しない"""
+    text = (
+        '{"strategy": {"vote_plan": "NO", "reason": "x"}}\n\n'
+        '{"strategy": {"vote_plan": "NO", "reason": "y"}}'
+    )
+    with pytest.raises(ParseError):
+        parse_response(text, "P04", "negotiation")
+
+
+# --- サイクル5.0: commitフェイズでvote_planだけから投票を救済 ---
+
+def test_rescues_vote_from_vote_plan_yes_on_commit_phase():
+    """commitで行動が無く、strategy.vote_plan=="YES" → vote_commit(YES)として救済"""
+    text = '{"strategy": {"vote_plan": "YES", "reason": "x", "emotion": "疑"}}'
+    _, action = parse_response(text, "P04", "commit")
+    assert isinstance(action, VoteCommitAction) and action.vote == Vote.YES
+
+
+def test_rescues_vote_from_vote_plan_no_on_commit_phase():
+    text = '{"strategy": {"vote_plan": "no", "reason": "x", "emotion": "疑"}}'
+    _, action = parse_response(text, "P04", "commit")
+    assert isinstance(action, VoteCommitAction) and action.vote == Vote.NO
+
+
+def test_does_not_rescue_vote_plan_on_negotiation_phase():
+    """交渉フェイズでは、同じ形でも救済しない（投票は推測しない）"""
+    text = '{"strategy": {"vote_plan": "YES", "reason": "x", "emotion": "疑"}}'
+    with pytest.raises(ParseError):
+        parse_response(text, "P04", "negotiation")
+
+
+def test_does_not_rescue_vote_plan_when_empty_or_invalid():
+    """vote_planが空文字・不正な値なら救済しない（退場者のvote_planは空、§13.1）"""
+    text = '{"strategy": {"vote_plan": "", "reason": "x", "emotion": "疑"}}'
+    with pytest.raises(ParseError):
+        parse_response(text, "P04", "commit")
+
+
 def test_unknown_action_type_raises_parse_error():
     with pytest.raises(ParseError):
         parse_response(_wrap({"type": "market_commit"}), "P01", "negotiation")
