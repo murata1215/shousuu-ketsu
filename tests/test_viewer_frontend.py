@@ -63,8 +63,22 @@ def test_watch_html_has_scene_copy_buttons() -> None:
 
 def test_watch_html_has_tabs_for_required_screens() -> None:
     html = _read("watch.html")
-    for tab in ("overview", "round", "contracts", "seat"):
+    for tab in ("overview", "round", "contracts", "money", "seat", "highlights"):
         assert f'data-tab="{tab}"' in html
+
+
+def test_watch_html_has_vote_tab_switching() -> None:
+    """ラウンドタブに投票（R?V?）の切り替えがある（サイクル4.3、§作るもの2）"""
+    html = _read("watch.html")
+    assert "vote-tab-bar" in html
+    assert "function renderVoteTabs(" in html
+
+
+def test_watch_html_has_event_line_scene_resolution() -> None:
+    """event=（記録の行番号）から場面を解決する関数がある（§作るもの8）"""
+    html = _read("watch.html")
+    assert "function resolveEventLine(" in html
+    assert "scene.event" in html
 
 
 def test_emotion_images_referenced_exist_on_disk() -> None:
@@ -144,6 +158,33 @@ def test_all_engine_action_failure_reasons_covered_in_watch_html() -> None:
         # f-stringのプレースホルダ({action.contract_id}等)を境に静的な断片へ分割し、
         # 断片（4文字以上）がwatch.html中にそのまま（または正規表現の一部として）
         # 存在することを確認する。プレースホルダ自体は値なので比較対象外。
+        fragments = [f for f in re.split(r"\{[^}]*\}", literal) if len(f.strip()) >= 4]
+        for frag in fragments:
+            if frag not in watch_html:
+                missing.append(f"{literal!r} の断片 {frag!r} がwatch.htmlに無い")
+    assert missing == [], "\n".join(missing)
+
+
+def test_all_contract_term_reject_reasons_covered_in_watch_html() -> None:
+    """
+    engine/contracts.py::validate_terms が返すTermRejection(...)のmessage_en
+    全文が、watch.htmlのREASON_JA（日本語化テーブル）でカバーされていることを
+    機械的に確認する（CLAUDE.md「過去の落とし穴」④・サイクル4.3新設:
+    CONTRACT_REJECTEDの理由も日本語化対象に加えた）。
+    """
+    contracts_src = (Path(__file__).resolve().parent.parent / "engine" / "contracts.py").read_text(encoding="utf-8")
+    # TermRejection(code, {params}, "message"/f"message") の3つ目の引数（文字列リテラル）を拾う。
+    # 複数行にわたる f"..." f"..." の連結も1つの引数として扱う。
+    literals = re.findall(
+        r'TermRejection\(\s*[A-Za-z0-9_.]+,\s*\{[^}]*\},\s*((?:f?"[^"]*"\s*)+?),?\s*\)',
+        contracts_src,
+    )
+    assert len(literals) >= 30  # 全数検査の前提（既知34件を下回ったら抽出側の不備を疑う）
+
+    watch_html = _read("watch.html")
+    missing = []
+    for raw in literals:
+        literal = "".join(re.findall(r'"([^"]*)"', raw))
         fragments = [f for f in re.split(r"\{[^}]*\}", literal) if len(f.strip()) >= 4]
         for frag in fragments:
             if frag not in watch_html:

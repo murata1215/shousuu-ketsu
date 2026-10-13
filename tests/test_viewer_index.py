@@ -83,3 +83,32 @@ def test_load_or_build_index_rebuilds_when_source_changes(tmp_path: Path) -> Non
 def test_index_path_lives_under_logs_viewer_index(tmp_path: Path) -> None:
     p = index_path("abc", tmp_path)
     assert p == tmp_path / "viewer_index" / "abc.json"
+
+
+def test_build_entries_includes_vote_num(tmp_path: Path) -> None:
+    """サイクル4.3: vote_num（v0.4のラウンド内投票番号）を索引に残す"""
+    llm_calls = [json.loads(line) for line in (FIXTURES / "fx_v05_llm_calls.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    entries = build_entries(llm_calls)
+    neg = [e for e in entries if e["phase"] == "negotiation" and e["player_id"] == "P02"]
+    assert neg
+    assert neg[0]["vote_num"] == 1
+
+
+def test_load_or_build_index_rebuilds_when_index_version_changes(tmp_path: Path) -> None:
+    """索引の形式版（INDEX_VERSION）が変わったら、ソースが同じでも作り直す
+    （サイクル4.3: vote_num追加前の古い索引が静かに使い続けられないようにする）"""
+    log_dir = tmp_path / "llm"
+    log_dir.mkdir()
+    calls_path = log_dir / "fx_demo_llm_calls.jsonl"
+    calls_path.write_bytes((FIXTURES / "fx_demo_llm_calls.jsonl").read_bytes())
+
+    load_or_build_index("fx_demo", log_dir)
+    idx_path = index_path("fx_demo", log_dir)
+    cached = json.loads(idx_path.read_text(encoding="utf-8"))
+    cached["index_version"] = -1  # 古い形式版を装う
+    idx_path.write_text(json.dumps(cached, ensure_ascii=False), encoding="utf-8")
+
+    load_or_build_index("fx_demo", log_dir)
+    rebuilt = json.loads(idx_path.read_text(encoding="utf-8"))
+    from viewer.log_index import INDEX_VERSION
+    assert rebuilt["index_version"] == INDEX_VERSION

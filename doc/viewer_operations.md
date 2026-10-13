@@ -13,7 +13,8 @@ gentei-jankenの`doc/viewer_operations.md`と同じ方式（systemd user service
 | working directory | `~/shousuu-ketsu` |
 | ExecStart | `~/shousuu-ketsu/.venv/bin/python -c "from viewer.server import main; main()"` |
 | Viewer bind | `127.0.0.1:9028` |
-| 公開経路（人間の作業が必要） | Caddy: `shousuu-ketsu-viewer.devrelay.io` → `localhost:9028`（未設定） |
+| 公開経路 | Caddy: `shousuu-ketsu-viewer.devrelay.io` → `localhost:9028`（設定済み、`/etc/caddy/sites.d/shousuu-ketsu-viewer.devrelay.io`） |
+| 記録の置き場（サイクル4.3） | 既定は`logs/llm_v0_4,logs/llm`の2つ（`VIEWER_LOG_ROOTS`で上書き可、カンマ区切り）。v0.4/v0.5の記録とv0.3の記録を両方見る |
 
 unitは`Restart=always`、`RestartSec=3`で動作する。
 
@@ -40,9 +41,9 @@ journalctl --user -u shousuu-viewer.service -n 100 --no-pager
 journalctl --user -u shousuu-viewer.service -f
 ```
 
-## Caddyでの公開（人間が実行する手順。sudo必須のためこのサイクルでは未実施）
+## Caddyでの公開（設定済み。将来の再構築用に手順を残す）
 
-`/etc/caddy/sites.d/shousuu-ketsu-viewer.devrelay.io` に以下を新規作成する
+`/etc/caddy/sites.d/shousuu-ketsu-viewer.devrelay.io` は以下の内容で設定済み
 （dangou-card-viewer.devrelay.io の設定に倣う）:
 
 ```caddyfile

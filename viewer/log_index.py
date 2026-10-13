@@ -25,9 +25,14 @@ from llm.response_parser import extract_json
 
 INDEX_SUBDIR = "viewer_index"
 
+# 索引の形式版。形式を変えたら上げる（キャッシュされた古い索引を黒く使い続け
+# ない。サイクル4.3: vote_numを追加したため2に上げた）
+INDEX_VERSION = 2
+
 # 索引に残す呼び出しメタデータの列（promptや生のresponse_textは含めない）
+# vote_num はサイクル4.3追加（v0.4のラウンド内の投票番号。§1.1）。
 _CALL_META_KEYS = (
-    "round_num", "player_id", "turn", "phase", "model_id",
+    "round_num", "vote_num", "player_id", "turn", "phase", "model_id",
     "emotion", "error_type", "error", "invalid_response", "reason",
     "elapsed_ms", "cost_usd",
 )
@@ -108,7 +113,9 @@ def index_path(game_id: str, log_dir: Path) -> Path:
 
 def load_or_build_index(game_id: str, log_dir: Path) -> list[dict[str, Any]]:
     """
-    索引を読む。無い・元の`{game_id}_llm_calls.jsonl`より古い場合は作り直して保存する。
+    索引を読む。無い・元の`{game_id}_llm_calls.jsonl`より古い・索引の形式版が
+    古い場合は作り直して保存する（サイクル4.3: INDEX_VERSIONで形式を固定し、
+    vote_num追加前の古い索引が静かに使い続けられないようにする）。
 
     Returns:
         索引エントリのリスト（build_entries()の戻り値と同形）
@@ -122,13 +129,20 @@ def load_or_build_index(game_id: str, log_dir: Path) -> list[dict[str, Any]]:
             cached = json.loads(idx_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             cached = None
-        if isinstance(cached, dict) and cached.get("source_fingerprint") == fp:
+        if (
+            isinstance(cached, dict)
+            and cached.get("source_fingerprint") == fp
+            and cached.get("index_version") == INDEX_VERSION
+        ):
             return cached.get("entries", [])
 
     entries = build_entries(_load_jsonl(calls_path))
     idx_path.parent.mkdir(parents=True, exist_ok=True)
     idx_path.write_text(
-        json.dumps({"source_fingerprint": fp, "entries": entries}, ensure_ascii=False),
+        json.dumps(
+            {"source_fingerprint": fp, "index_version": INDEX_VERSION, "entries": entries},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     return entries

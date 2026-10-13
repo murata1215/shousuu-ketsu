@@ -1,17 +1,21 @@
 """
-本戦 l12r12_2002 の記録でのビューア確認（サイクル3.0）
+本戦 l12r12_2002（v0.3形式）の記録でのビューア確認（サイクル3.0、サイクル4.3で
+v0.3形式の扱い案Bに合わせて作り直し）
 
 logs/llm/はコミット対象外（.gitignore）のため、本戦の記録がこのマシン上に
-無い環境では全てスキップする。あるときだけ、doc/analysis/l12r12_2002_facts.md
-に書かれた事実（R4・R9が11対1、R8・R11が6対6、成立契約56本、型Cの支払い
-13件、最終順位）が画面のデータとして正しく出ることを確認する。
+無い環境では全てスキップする。v0.3形式の記録はサイクル4.3以降、詳細
+（ラウンド・契約・お金の推移）は返さず、席・モデル・最終資産・順位だけを
+返す（§v0.3の試合の扱い案B）。本テストはその最小限の事実
+（doc/analysis/l12r12_2002_facts.md）が画面のデータとして正しく出ることを
+確認する。v0.4/v0.5形式の本番試合の詳細な確認は
+tests/test_viewer_real_match_v0_4.py を参照。
 """
 
 from pathlib import Path
 
 import pytest
 
-from viewer.log_parser import fold_assets, get_contracts, get_overview, get_round
+from viewer.log_parser import get_contracts, get_overview, get_round
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs" / "llm"
 GAME_ID = "l12r12_2002"
@@ -27,50 +31,17 @@ def overview() -> dict:
     return get_overview(LOGS_DIR, GAME_ID)
 
 
-def test_overview_found_and_completed(overview: dict) -> None:
+def test_overview_detected_as_legacy_v0_3_format(overview: dict) -> None:
     assert overview is not None
+    assert overview["format"] == "v0.3"
     assert overview["completed"] is True
-    assert overview["num_rounds"] == 12
+    assert "legacy_notice" in overview
+    assert "rounds" not in overview  # 詳細は返さない（案B）
 
 
-def test_r4_and_r9_are_11_to_1(overview: dict) -> None:
-    rounds = {r["round_num"]: r for r in overview["rounds"]}
-    for rn in (4, 9):
-        assert {rounds[rn]["yes_count"], rounds[rn]["no_count"]} == {11, 1}
-    assert rounds[4]["minority_ids"] == ["P02"]
-    assert rounds[9]["minority_ids"] == ["P02"]
-
-
-def test_r8_and_r11_are_6_to_6_tie() -> None:
-    round8 = get_round(LOGS_DIR, GAME_ID, 8)
-    round11 = get_round(LOGS_DIR, GAME_ID, 11)
-    for data in (round8, round11):
-        votes = next(e for e in data["timeline"] if e["kind"] == "vote_result")["votes"]
-        yes = sum(1 for v in votes.values() if v == "YES")
-        no = sum(1 for v in votes.values() if v == "NO")
-        assert yes == 6 and no == 6
-
-
-def test_established_contracts_count_is_56(overview: dict) -> None:
-    assert overview["established_contracts"] == 56
-
-
-def test_type_c_payments_count_is_13() -> None:
-    contracts = get_contracts(LOGS_DIR, GAME_ID)
-    type_c_payments = [
-        ob for c in contracts["established"] for ob in c["obligations"]
-        if ob["ob_type"] == "type_c_conditional" and ob["outcome"] == "支払い発生"
-    ]
-    assert len(type_c_payments) == 13
-
-
-def test_no_type_b_violations() -> None:
-    contracts = get_contracts(LOGS_DIR, GAME_ID)
-    violated = [
-        ob for c in contracts["established"] for ob in c["obligations"]
-        if ob["ob_type"] == "type_b_vote" and ob["outcome"] == "違約金支払い"
-    ]
-    assert violated == []
+def test_get_round_and_get_contracts_return_none_for_legacy(overview: dict) -> None:
+    assert get_round(LOGS_DIR, GAME_ID, 4) is None
+    assert get_contracts(LOGS_DIR, GAME_ID) is None
 
 
 def test_final_ranks_match_facts_report(overview: dict) -> None:
@@ -92,43 +63,8 @@ def test_final_assets_match_facts_report(overview: dict) -> None:
     assert actual_assets == expected_assets
 
 
-def test_asset_fold_matches_game_end_exactly() -> None:
-    import json
-    events = [
-        json.loads(line)
-        for line in (LOGS_DIR / f"{GAME_ID}_events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    snapshots = fold_assets(events)
-    final = [e for e in events if e["event_type"] == "GAME_END"][0]["data"]["final_assets"]
-    r12 = snapshots[12]
-    for pid, expected in final.items():
-        assert r12[pid]["asset"] == expected
-
-
 def test_loan_amounts_match_facts_report(overview: dict) -> None:
     loans_by_pid = {r["player_id"]: r["loan"] for r in overview["roster"]}
     assert loans_by_pid["P03"] == 5_000_000
     assert loans_by_pid["P12"] == 6_000_000
     assert loans_by_pid["P01"] == 1_200_000
-
-
-def test_r9_established_contracts_carry_obligations() -> None:
-    """ラウンドページの成立契約に義務の中身が付く（サイクル3.1、viewer手直し）"""
-    round9 = get_round(LOGS_DIR, GAME_ID, 9)
-    established = [e for e in round9["timeline"] if e["kind"] == "contract_established"]
-    assert established  # R9は成立10件
-    for item in established:
-        assert item["obligations"], f"{item['contract_id']}に義務が付いていない"
-
-
-def test_contract_seq_54_obligations() -> None:
-    """成立順54番（R12成立、P08/P03）の義務3本の結果区分を確認する"""
-    contracts = get_contracts(LOGS_DIR, GAME_ID)
-    c54 = next(c for c in contracts["established"] if c["contract_seq"] == 54)
-    assert c54["round_established"] == 12
-    assert set(c54["parties"]) == {"P08", "P03"}
-    outcomes = {(ob["obligor"], ob["ob_type"]): ob["outcome"] for ob in c54["obligations"]}
-    assert outcomes[("P03", "type_b_vote")] == "履行"
-    assert outcomes[("P03", "type_c_conditional")] == "支払い発生"
-    assert outcomes[("P08", "type_c_conditional")] == "条件が外れた"

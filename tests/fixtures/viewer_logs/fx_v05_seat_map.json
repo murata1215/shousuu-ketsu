@@ -1,0 +1,14 @@
+{
+  "P01": "claude-opus-5",
+  "P02": "claude-haiku-4-5",
+  "P03": "gpt-4.1-mini",
+  "P04": "gemini-2.5-flash",
+  "P05": "grok-4",
+  "P06": "deepseek-v3",
+  "P07": "kimi-k2",
+  "P08": "claude-sonnet-5",
+  "P09": "gpt-5",
+  "P10": "gemini-2.5-pro",
+  "P11": "grok-4-fast",
+  "P12": "deepseek-v3-pro"
+}

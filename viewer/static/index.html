@@ -48,13 +48,17 @@ async function loadGames() {
       return;
     }
     el.innerHTML = games.map(g => {
-      const status = g.completed ? '終了' : `R${g.last_round}まで進行`;
+      const legacy = g.format === 'v0.3';
+      const status = legacy
+        ? '旧形式（v0.3）'
+        : (g.completed ? '終了' : `R${g.last_round}V${g.last_vote}まで進行`);
       const winner = g.winner_model_label
         ? `<span class="winner">1位: ${escapeHtml(g.winner_player_id)}(${escapeHtml(g.winner_model_label)})</span>`
         : '';
       const transcript = g.transcript_available ? '' : '<span>会話は表示できません</span>';
-      return `<a class="game-card" href="watch?game=${encodeURIComponent(g.game_id)}">
-        <div class="game-id">${escapeHtml(g.game_id)}</div>
+      const legacyBadge = legacy ? '<span class="legacy-badge">旧形式（v0.3）</span>' : '';
+      return `<a class="game-card${legacy ? ' legacy' : ''}" href="watch?game=${encodeURIComponent(g.game_id)}">
+        <div class="game-id">${escapeHtml(g.game_id)} ${legacyBadge}</div>
         <div class="meta">
           <span>${escapeHtml(g.num_players)}席</span>
           <span>${escapeHtml(status)}</span>
