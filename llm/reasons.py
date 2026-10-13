@@ -27,7 +27,7 @@ from engine.config import GameConfig
 from engine.contracts import TermRejectReason
 from llm.formatting import comma, pct
 
-# --- engine/actions.py::RejectReason（16種） ---
+# --- engine/actions.py::RejectReason（17種） ---
 _ACTION_REASON_JA: dict[str, str] = {
     RejectReason.DM_TO_SELF.value: "DMの宛先が自分自身でした。自分以外のプレイヤーIDを指定してください。",
     RejectReason.UNKNOWN_TARGET.value: "宛先の{to}というプレイヤーはいません。",
@@ -64,6 +64,10 @@ _ACTION_REASON_JA: dict[str, str] = {
     RejectReason.UNKNOWN_ACTION_TYPE.value: (
         "アクション種別の{t}はありません。使えるのは "
         "dm / broadcast / transfer / repay / pass / contract_propose / contract_sign です。"
+    ),
+    RejectReason.INTERNAL_ERROR.value: (
+        "この行動は処理の途中で問題が起きたため、不成立になりました。"
+        "内容を変えてもう一度試してください。"
     ),
 }
 

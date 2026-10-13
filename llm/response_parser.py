@@ -445,9 +445,14 @@ def _validate_type_c_term_shape(i: int, term: dict[str, Any]) -> None:
             f"有効なcondition_type: {', '.join(sorted(_VALID_CONDITION_TYPES))}",
         )
     if has_share and condition_type != "wins_round":
+        # pool_shareはこの関数より前（_validate_pool_share_term_shape側）で
+        # 分岐済みなので、ここに来るのはminority_side/in_minorityだけ。
+        # ただし案内文は読み手に「share_percentが使えるのはwins_roundのみ」
+        # と誤解させないよう、engine/contracts.py::TermRejectReason.
+        # SHARE_PERCENT_ONLY_WINS_ROUNDの文言（§6.4）にそろえる（サイクル5.0a）。
         raise ParseError(
             f"terms[{i}]でshare_percentを{condition_type}に使っています",
-            "share_percentが使えるのはwins_roundだけです",
+            "share_percentが使えるのはwins_roundまたはpool_shareだけです",
         )
     condition = details.get("condition")
     if not isinstance(condition, dict):
@@ -600,6 +605,12 @@ def _convert_action(data: dict[str, Any], player_id: str, phase: str) -> Action:
                         f"terms[{i}]のtype_b_vote detailsが不正",
                         'type_b_voteのdetailsは{"vote": "YES"|"NO"} の形式である必要があります',
                     )
+                # vote_commit（上のvote_raw処理）と同じく大文字にそろえてから
+                # 先へ渡す。engine/contracts.py::validate_termsは完全一致で
+                # "YES"/"NO"を求めるため、ここで直さないと小文字の"yes"等が
+                # この層では通るのに、その先で不成立になってしまう
+                # （CLAUDE.md過去の落とし穴④、サイクル5.0aで発見）。
+                details["vote"] = vote.strip().upper()
                 if "vote_num" not in term:
                     raise ParseError(
                         f"terms[{i}]にvote_numがありません",

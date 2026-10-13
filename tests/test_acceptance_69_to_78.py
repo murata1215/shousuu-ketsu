@@ -9,9 +9,21 @@
 最後に、提案→署名→精算→本人に届く文面（義務の表示とお金の出入り）までが
 Game経由で通ることを確かめる1本（tests/test_acceptance_58_to_68.py の#60と
 同じ形）を足す（受け入れ番号の対象外、実装の配線そのものの確認）。
+
+サイクル5.0aで、#78のさらに通しの確認を1本足した
+（test_acceptance_78_full_game_wiring_with_all_stray_fields_in_pool_share_proposal）。
+本番試合t12_r4_4501bが、AIの提案したpool_shareの項にround_numが1つ書き添え
+られていたことでcreate_contractの中で例外になり停止した（validate_termsは
+通したが、その先のObligation生成が書かれた値をそのまま渡していたため）。
+#78は従来validate_termsだけを直接呼んでいて、この抜けを検出できなかった。
+新しいテストはAIの応答の読み取り（llm.response_parser.parse_response）から
+入れて、提案→署名→成立→ラウンドの精算→本人に届く記録まで実際にGameを
+通して確かめる。
 """
 
 from __future__ import annotations
+
+import json
 
 from engine.config import GameConfig
 from engine.contracts import TermRejectReason, validate_terms
@@ -23,6 +35,7 @@ from engine.models import (
 )
 from engine.settlement import settle_round
 from llm.prompt_builder import build_negotiation_prompt
+from llm.response_parser import parse_response
 from tests.helpers import ScriptedAgent, VisibleStateRecordingAgent, make_roster
 
 
@@ -371,3 +384,83 @@ def test_pool_share_full_game_wiring_propose_sign_settle_and_prompt() -> None:
     build_negotiation_prompt(
         PlayerState(player_id="P12", cash=0, initial_loan=0), 1, 1, 1, vs_p12, config,
     )
+
+
+def test_acceptance_78_full_game_wiring_with_all_stray_fields_in_pool_share_proposal() -> None:
+    """
+    #78のさらに通しの確認（サイクル5.0a）。
+
+    本番試合t12_r4_4501bで実際に止まった形（pool_shareの項にround_numが
+    書き添えられていた）を含む、obligor・counterparty・round_num・vote_num・
+    conditionを全部書き添えたpool_shareの提案を、AIの応答の読み取り
+    （llm.response_parser.parse_response）から入れて、提案→署名→成立→
+    ラウンドの精算→本人に届く記録までGame経由で例外なく通ることを確かめる。
+
+    4人組（P01・P02・P03・P04、X=60）、P01が1人で勝ち残る試合
+    （test_pool_share_full_game_wiring_propose_sign_settle_and_promptと同じ
+    勝敗構成）。
+    """
+    response_text = json.dumps({
+        "strategy": {"reason": "pool_shareで保険をかける", "emotion": "楽"},
+        "action": {
+            "type": "contract_propose",
+            "with": ["P02", "P03", "P04"],
+            "terms": [{
+                "obligor": "P01", "counterparty": "P02", "round_num": 3, "vote_num": 2,
+                "ob_type": "type_c_conditional",
+                "details": {
+                    "share_percent": 60, "condition_type": "pool_share",
+                    "condition": {"target_player": "P01"},
+                },
+            }],
+        },
+    }, ensure_ascii=False)
+    _strategy, parsed_action = parse_response(response_text, "P01", "negotiation")
+    assert isinstance(parsed_action, ContractProposeAction)
+    # 読み取り自体は、書き添えられた余計な項目を落とさずそのまま運ぶ
+    # （捨てるのはengine/contracts.py::create_contractの役割、§9.3）。
+    term = parsed_action.terms[0]
+    assert term["obligor"] == "P01" and term["round_num"] == 3 and term["vote_num"] == 2
+    assert "condition" in term["details"]
+
+    V1_YES = {"P01"}
+    votes_by_vote = {
+        (1, 1): {pid: (Vote.YES if pid in V1_YES else Vote.NO) for pid in [f"P{i:02d}" for i in range(1, 13)]},
+    }
+    agents = make_roster(votes_by_vote, num_players=12)
+    agents["P01"] = ScriptedAgent(
+        "P01", votes=agents["P01"].votes, loan=1_200_000,
+        negotiate_actions={(1, 1, 1): parsed_action},
+    )
+    agents["P02"].sign_proposer_at[(1, 1, 2)] = "P01"
+    agents["P03"].sign_proposer_at[(1, 1, 2)] = "P01"
+    agents["P04"].sign_proposer_at[(1, 1, 2)] = "P01"
+
+    rec01 = VisibleStateRecordingAgent(agents["P01"])
+    rec02 = VisibleStateRecordingAgent(agents["P02"])
+    agents["P01"], agents["P02"] = rec01, rec02
+
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=6901, logger=EventLogger())
+    game.run()  # 例外が出ないことが主眼（create_contractで止まっていた不具合）
+
+    established = [c for c in game.contracts if c.status == ContractStatus.ACTIVE]
+    assert len(established) == 1
+    ob = established[0].obligations[0]
+    assert ob.obligor is None and ob.counterparty is None
+    assert ob.round_num is None and ob.vote_num is None
+    assert "condition" not in ob.details
+
+    round_end_01 = next(s[3] for s in rec01.reflect_snapshots if s[0] == 1 and s[2] is True)
+    payments_01 = [
+        e for r in round_end_01["my_cash_flow"]["rounds"] for e in r["entries"]
+        if e["kind"] == "contract_payment_paid" and e.get("condition_type") == "pool_share"
+    ]
+    assert len(payments_01) == 3  # P02・P03・P04への3本
+
+    round_end_02 = next(s[3] for s in rec02.reflect_snapshots if s[0] == 1 and s[2] is True)
+    received_02 = [
+        e for r in round_end_02["my_cash_flow"]["rounds"] for e in r["entries"]
+        if e["kind"] == "contract_payment_received" and e.get("condition_type") == "pool_share"
+    ]
+    assert len(received_02) == 1

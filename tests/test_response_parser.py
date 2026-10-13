@@ -100,6 +100,26 @@ def test_parse_contract_propose_type_b_vote():
     assert isinstance(action, ContractProposeAction)
 
 
+def test_parse_contract_propose_type_b_vote_normalizes_lowercase_vote():
+    """
+    小文字の"yes"/"no"は、vote_commitのvote_raw処理と同じく大文字に
+    そろえてから先へ渡す（サイクル5.0a）。
+
+    そろえずに渡すと、この層（parse_response）では通るのに、その先
+    （engine/contracts.py::validate_termsの完全一致チェック）で不成立に
+    なってしまう（同じ語の扱いが2か所で違う形、CLAUDE.md過去の落とし穴④）。
+    """
+    terms = [
+        {"obligor": "P07", "counterparty": "P01", "ob_type": "type_b_vote",
+         "round_num": 5, "vote_num": 1, "details": {"vote": "no"}},
+    ]
+    _, action = parse_response(
+        _wrap({"type": "contract_propose", "with": ["P07"], "terms": terms}), "P01", "negotiation",
+    )
+    assert isinstance(action, ContractProposeAction)
+    assert action.terms[0]["details"]["vote"] == "NO"
+
+
 def test_parse_contract_propose_type_b_vote_requires_vote_num():
     terms = [
         {"obligor": "P07", "counterparty": "P01", "ob_type": "type_b_vote",

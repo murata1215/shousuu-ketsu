@@ -21,6 +21,7 @@ dangou-card `engine/game.py`（B分類）の並列化3段構えパターン
 並列化しない）。
 """
 
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Literal
 
@@ -41,6 +42,8 @@ from engine import actions as action_ops
 from engine import contracts as contract_ops
 from engine import player as player_ops
 from engine import round as round_ops
+
+logger = logging.getLogger(__name__)
 
 _CASH_FLOW_TOTAL_KEYS = ("cash_in", "cash_out", "cash_delta", "debt_up", "debt_down", "debt_delta", "borrowed")
 
@@ -87,6 +90,16 @@ class Game:
         stop_after_round: 指定時、このラウンドの処理を終えたら
             config.num_rounds 前でも実行を打ち切る（「実行だけ」の打ち切り。
             is_finalはconfig.num_rounds基準のまま）。
+        continue_on_action_error: Trueの場合、交渉の1アクション（AIへの
+            問い合わせ・形式検証・実行）の中で想定外の例外が起きても試合
+            全体を止めず、その行動だけ不成立として本人に理由を返し、記録
+            （イベントログ・標準エラー出力）を残して次の人へ進む
+            （サイクル5.0a: create_contractがpool_shareの余計な項目を
+            そのまま渡して例外になった不具合で、本番試合が停止した事故の
+            再発防止）。既定はFalse（例外をそのまま上げる）。Bot検証
+            （sim/metrics.py）・テスト・見本出力はこの既定のままにして、
+            想定外の不具合にはすぐ気づけるようにする。実際のAIを使う試合
+            （scripts/llm_trial.py）だけTrueにする。
     """
 
     def __init__(
@@ -99,6 +112,7 @@ class Game:
         on_question_published: Callable[[int, int, str], None] | None = None,
         max_parallel_agents: int = 1,
         stop_after_round: int | None = None,
+        continue_on_action_error: bool = False,
     ) -> None:
         if len(agents) != config.num_players:
             raise ValueError(
@@ -121,6 +135,7 @@ class Game:
         self.on_question_published = on_question_published
         self._max_parallel_agents = max_parallel_agents
         self._stop_after_round = stop_after_round
+        self._continue_on_action_error = continue_on_action_error
 
         self.players: dict[str, PlayerState] = {}
         self.carryover: int = 0
@@ -658,51 +673,66 @@ class Game:
                 p = self.players[pid]
                 agent = self.agents[pid]
                 visible_state = self._build_visible_state(round_num, vote_num, for_player_id=pid)
-                action = agent.negotiate(p, round_num, vote_num, turn, visible_state)
+                action: Action | None = None
+                try:
+                    action = agent.negotiate(p, round_num, vote_num, turn, visible_state)
 
-                if isinstance(action, PassAction):
-                    # §7.5「直前の自分の行動」。passも「行動」なので、前の
-                    # 不成立の理由はここで消える（持ち越さない）。
-                    self._last_action_error.pop(pid, None)
-                    self.logger.log(
-                        "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
-                        visibility="spectator",
-                        data={"player_id": pid, "action": "pass", "turn": turn},
-                    )
-                    continue
-
-                all_passed = False
-                result = action_ops.validate_action(
-                    action, p, self.config, self.players,
-                    round_num=round_num, vote_num=vote_num, contracts=self.contracts,
-                )
-                if not result.success:
-                    self._last_action_error[pid] = {
-                        "code": result.reason_code,
-                        "params": result.reason_params,
-                        "message_en": result.reason or "",
-                    }
-                    self.logger.log(
-                        "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
-                        visibility="spectator",
-                        data={
-                            "player_id": pid, "action": action.type,
-                            "success": False, "reason": result.reason, "turn": turn,
-                        },
-                    )
-                    if isinstance(action, ContractProposeAction):
-                        # 形式に合わない提案は提案者にのみ理由を返す（§9.3）
+                    if isinstance(action, PassAction):
+                        # §7.5「直前の自分の行動」。passも「行動」なので、前の
+                        # 不成立の理由はここで消える（持ち越さない）。
+                        self._last_action_error.pop(pid, None)
                         self.logger.log(
-                            "CONTRACT_REJECTED", round_num, "negotiation", vote_num=vote_num,
-                            visibility="self",
-                            data={"player_id": pid, "reason": result.reason, "turn": turn},
+                            "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
+                            visibility="spectator",
+                            data={"player_id": pid, "action": "pass", "turn": turn},
                         )
-                    continue
+                        continue
 
-                self._last_action_error.pop(pid, None)
-                established_this_turn += self._execute_negotiation_action(
-                    action, pid, round_num, vote_num, turn,
-                )
+                    all_passed = False
+                    result = action_ops.validate_action(
+                        action, p, self.config, self.players,
+                        round_num=round_num, vote_num=vote_num, contracts=self.contracts,
+                    )
+                    if not result.success:
+                        self._last_action_error[pid] = {
+                            "code": result.reason_code,
+                            "params": result.reason_params,
+                            "message_en": result.reason or "",
+                        }
+                        self.logger.log(
+                            "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
+                            visibility="spectator",
+                            data={
+                                "player_id": pid, "action": action.type,
+                                "success": False, "reason": result.reason, "turn": turn,
+                            },
+                        )
+                        if isinstance(action, ContractProposeAction):
+                            # 形式に合わない提案は提案者にのみ理由を返す（§9.3）
+                            self.logger.log(
+                                "CONTRACT_REJECTED", round_num, "negotiation", vote_num=vote_num,
+                                visibility="self",
+                                data={"player_id": pid, "reason": result.reason, "turn": turn},
+                            )
+                        continue
+
+                    self._last_action_error.pop(pid, None)
+                    established_this_turn += self._execute_negotiation_action(
+                        action, pid, round_num, vote_num, turn,
+                    )
+                except Exception as exc:
+                    # 1人分の手番（AIへの問い合わせ・形式検証・実行）をまとめて
+                    # 1か所だけで守る（ガードを2か所に分けない、CLAUDE.md
+                    # 落とし穴④）。既定（continue_on_action_error=False）では
+                    # そのまま上げ、Bot検証・テスト・見本出力は従来どおり
+                    # 想定外の不具合に気づける（サイクル5.0a: create_contractが
+                    # pool_shareの余計な項目をそのまま渡して例外になり、本番
+                    # 試合t12_r4_4501bが停止した事故の再発防止）。
+                    if not self._continue_on_action_error:
+                        raise
+                    all_passed = False
+                    self._handle_negotiation_action_error(action, exc, pid, round_num, vote_num, turn)
+                    continue
 
             self.logger.log(
                 "TURN_CONTRACTS_ESTABLISHED", round_num, "negotiation", vote_num=vote_num,
@@ -722,6 +752,58 @@ class Game:
                 break
 
         self._expire_unsigned_contracts(round_num, vote_num)
+
+    def _handle_negotiation_action_error(
+        self, action: Action | None, exc: Exception, pid: str, round_num: int, vote_num: int, turn: int,
+    ) -> None:
+        """
+        交渉の1アクション（AIへの問い合わせ・形式検証・実行）の中で起きた
+        想定外の例外を記録し、その行動だけ不成立にして試合を続ける
+        （continue_on_action_error=Trueのときだけ呼ばれる。§7.5、
+        サイクル5.0a新設）。
+
+        残す記録は3つ（CLAUDE.md過去の落とし穴⑰: 失敗という事実自体が
+        記録に出ない構造にしない）:
+          1. 標準エラー出力（logging。実際のAIを使う試合では
+             scripts/llm_trial.pyの_run.logに残る）に例外の種類・内容・
+             差し手・場所を出す。
+          2. イベントログ（NEGOTIATION_ACTION、観戦者のみ。新しいイベント
+             種別は作らない。success=False・error_type・errorを持つ）。
+          3. 本人への理由（_last_action_error。RejectReason.INTERNAL_ERRORの
+             定型文だけを渡し、例外の生の文字列は本人には渡さない）。
+
+        行動がContractProposeActionだった場合は、既存の「形式に合わない
+        提案」と同じくCONTRACT_REJECTED（本人のみ）も残す（§9.3）。
+
+        actionは、エージェントへの問い合わせ自体で例外が起きた場合はNone
+        （どんな行動を試みたか分からない）。
+        """
+        error_type = type(exc).__name__
+        error_text = str(exc)
+        action_type = action.type if action is not None else "unknown"
+        logger.warning(
+            "unexpected error for %s negotiation R%dV%d turn=%d action=%s: %s: %s",
+            pid, round_num, vote_num, turn, action_type, error_type, error_text,
+        )
+        self._last_action_error[pid] = {
+            "code": action_ops.RejectReason.INTERNAL_ERROR.value,
+            "params": {},
+            "message_en": f"{error_type}: {error_text}",
+        }
+        self.logger.log(
+            "NEGOTIATION_ACTION", round_num, "negotiation", vote_num=vote_num,
+            visibility="spectator",
+            data={
+                "player_id": pid, "action": action_type,
+                "success": False, "error_type": error_type, "error": error_text, "turn": turn,
+            },
+        )
+        if isinstance(action, ContractProposeAction):
+            self.logger.log(
+                "CONTRACT_REJECTED", round_num, "negotiation", vote_num=vote_num,
+                visibility="self",
+                data={"player_id": pid, "reason": f"{error_type}: {error_text}", "turn": turn},
+            )
 
     def _expire_unsigned_contracts(self, round_num: int, vote_num: int) -> None:
         """

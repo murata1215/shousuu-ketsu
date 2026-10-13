@@ -532,6 +532,12 @@ def run_trial(args: argparse.Namespace, adapter_factory: Any = create_adapter) -
         config=config, agents=agents, seed=args.seed, logger=logger,
         questions=questions, on_question_published=on_question_published,
         max_parallel_agents=args.parallel, stop_after_round=args.stop_after_round,
+        # 実際のAIを使う試合だけ、交渉の1アクションの想定外の例外で試合
+        # 全体を止めない（サイクル5.0a: create_contractがpool_shareの余計な
+        # 項目をそのまま渡して例外になり、本番試合t12_r4_4501bが停止した
+        # 事故の再発防止）。Bot検証・テストでは既定のFalseのままにして、
+        # 想定外の不具合にすぐ気づけるようにする。
+        continue_on_action_error=True,
     )
 
     try:

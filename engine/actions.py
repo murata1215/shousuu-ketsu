@@ -59,6 +59,12 @@ class RejectReason(str, Enum):
     NOT_AWAITING_SIGNATURES = "not_awaiting_signatures"
     ALREADY_SIGNED = "already_signed"
     UNKNOWN_ACTION_TYPE = "unknown_action_type"
+    INTERNAL_ERROR = "internal_error"
+    """想定外の例外（§サイクル5.0a新設）。交渉の1アクション（AIへの問い合わせ・
+    形式検証・実行）の途中で想定外の例外が起きた場合に使う
+    （engine/game.py::Game._continue_on_action_error がTrueのときだけ発生する。
+    既定Falseでは例外をそのまま上げるため、この値が本人に渡ることは無い）。
+    理由の生の文字列は本人に渡さず、記録（イベントログ・標準エラー出力）にのみ残す。"""
 
 
 class ActionResult:

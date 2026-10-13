@@ -275,22 +275,31 @@ class Obligation(BaseModel):
     @model_validator(mode="after")
     def _check_pool_share_shape(self) -> "Obligation":
         """
-        pool_shareのときだけobligor/counterparty/round_numが「なし」で、
-        それ以外の型では必須であることを確かめる（§6.1/§6.4/§9.3）。
+        pool_shareのときだけobligor/counterparty/round_num/vote_numが
+        「なし」で、それ以外の型ではobligor/counterparty/round_numが
+        必須であることを確かめる（§6.1/§6.4/§9.3）。
 
         形式の検査自体（提案を不成立にするかどうか）は
         engine/contracts.py::validate_terms が担当する。ここはモデルの
         内部不変条件（契約の作り方を間違えたらここで止まる）であり、
         プレイヤーへの理由の通知はしない。
+
+        サイクル5.0aでvote_numも検査対象に加えた（それまではobligor/
+        counterparty/round_numだけを見ていたため、山分けの項に
+        vote_numだけが書かれていても気づけなかった）。
         """
         is_pool_share = (
             self.ob_type == ObligationType.TYPE_C_CONDITIONAL
             and self.details.get("condition_type") == ConditionType.POOL_SHARE.value
         )
         if is_pool_share:
-            if self.obligor is not None or self.counterparty is not None or self.round_num is not None:
+            if (
+                self.obligor is not None or self.counterparty is not None
+                or self.round_num is not None or self.vote_num is not None
+            ):
                 raise ValueError(
-                    "pool_share obligations must not set obligor/counterparty/round_num (§6.4)"
+                    "pool_share obligations must not set "
+                    "obligor/counterparty/round_num/vote_num (§6.4)"
                 )
         else:
             if self.obligor is None or self.counterparty is None or self.round_num is None:

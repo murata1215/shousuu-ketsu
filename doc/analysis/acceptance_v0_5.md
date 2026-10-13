@@ -104,7 +104,7 @@ engine/contracts.py::TermRejectReason・llm/reasons.py::reject_reason_jaで
 | 75 | P01が、山分けでP02から分け前を受け取る。P01は別の山分けにも入っている | `tests/test_acceptance_69_to_78.py::test_acceptance_75_received_pool_share_not_re_split_or_used_as_funding` | 合格 |
 | 76 | 受取額1,000,000円、X=50、当事者4人 | `tests/test_acceptance_69_to_78.py::test_acceptance_76_pool_share_floor_division` | 合格 |
 | 77 | 1つの契約にpool_shareが2本ある。またはshare_percentが0か101、またはamountを指定した | `tests/test_acceptance_69_to_78.py::test_acceptance_77_pool_share_duplicated_rejected`（amount: `test_acceptance_77_pool_share_amount_rejected`／0: `test_acceptance_77_pool_share_share_percent_zero_rejected`／101: `test_acceptance_77_pool_share_share_percent_101_rejected`） | 合格 |
-| 78 | pool_shareの項にobligor・counterparty・round_numが書かれている | `tests/test_acceptance_69_to_78.py::test_acceptance_78_pool_share_ignores_obligor_counterparty_round_num` | 合格 |
+| 78 | pool_shareの項にobligor・counterparty・round_numが書かれている | `tests/test_acceptance_69_to_78.py::test_acceptance_78_pool_share_ignores_obligor_counterparty_round_num`（提案の形式検証だけでなく、AIの応答の読み取り→提案→署名→成立→ラウンドの精算→本人に届く記録まで試合を通して確かめる1本を追加: `test_acceptance_78_full_game_wiring_with_all_stray_fields_in_pool_share_proposal`。サイクル5.0a、注8参照） | 合格 |
 
 ## 集計
 
@@ -243,6 +243,36 @@ _obligation_status_sentence`の「はが」「はの」「へ済み」という�
 - `tests/test_devlog_no_coauthor.py`で、devlogに`Co-Authored-By`の
   git trailerが無いことを固定した。既存devlog2件（2026-10-11_224741.md・
   2026-10-12_075200.md）にまぎれていた行を消した。
+
+## 注8: サイクル5.0aで見つかった不具合（#78の抜け）
+
+本番の試合`t12_r4_4501b`が、AIが出したpool_shareの提案（`round_num`が1つ
+書き添えられていた）で止まった。`validate_terms`は仕様どおり無視して
+通したが、`engine/contracts.py::create_contract`が書かれた値をそのまま
+`Obligation`へ渡していたため、`Obligation`の内部検査（山分けはこれらを
+持たない）に落ちて例外になった。#78は`validate_terms`だけを直接呼ぶ
+単体テストで、この先（契約を作る処理）の抜けを検出できなかった。
+
+直したのは`create_contract`がpool_shareの項から`obligor`・
+`counterparty`・`round_num`・`vote_num`と、`details`の`condition`を
+実際に捨てるようにしたこと（`Obligation`の内部検査にも`vote_num`を
+足した）。#78に試合を通す形のテストを足し、同じ抜けが再発しないように
+した。
+
+あわせて見つけた小さな不一致2点も直した: (1) 型Bの投票先を小文字
+（`"yes"`等）で書くと、`llm/response_parser.py`の層では通るのに、
+`engine/contracts.py::validate_terms`の完全一致チェックで不成立になる
+（`vote_commit`の`vote_raw`処理と同じく大文字にそろえて先へ渡すように
+直した）。(2) `_validate_type_c_term_shape`の案内文「share_percentが
+使えるのはwins_roundだけです」が、v0.5で`pool_share`も使えるようになった
+ことを反映していなかった（到達しないが紛らわしいため文言をそろえた）。
+
+交渉の1アクション（AIへの問い合わせ・形式検証・実行）で想定外の例外が
+起きても試合全体を止めないための備えも入れた（`Game`の
+`continue_on_action_error`引数。既定False=そのまま上げる。実際のAIを使う
+試合（`scripts/llm_trial.py`）だけTrueにする）。記録は3つ（標準エラー
+出力・イベントログ・本人への理由）残し、Bot検証・テストでは既定のまま
+想定外の不具合にすぐ気づける形を保っている。
 
 ## 既存エンジンテストとの関係
 

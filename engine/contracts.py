@@ -128,9 +128,28 @@ def create_contract(
     """
     obligations: list[Obligation] = []
     for i, term in enumerate(terms):
-        # pool_share（山分け）はobligor/counterparty/round_numを持たない
-        # （§6.4/§9.3）。validate_termsで検証済みのtermだけが渡される前提
-        # なので、通常の型はこれまでどおり必須キーの直接添字アクセスのまま
+        details = dict(term.get("details", {}))
+        # pool_share（山分け）はobligor/counterparty/round_num/vote_numを
+        # 持たない（§6.4/§9.3）。validate_termsは書かれていても無視して
+        # 通すだけなので、ここで実際に捨てる（捨てないとObligationの内部
+        # 検査（山分けはこれらを持たない）に落ちて例外になる。サイクル5.0a
+        # で見つかった不具合。CLAUDE.md過去の落とし穴⑲）。detailsの
+        # conditionも同じ理由で捨てる（§9.3「conditionを持たない」）。
+        is_pool_share = (
+            term.get("ob_type") == ObligationType.TYPE_C_CONDITIONAL.value
+            and details.get("condition_type") == ConditionType.POOL_SHARE.value
+        )
+        if is_pool_share:
+            details.pop("condition", None)
+            obligations.append(Obligation(
+                obligation_id=f"{contract_id}_OB{i + 1:02d}",
+                contract_id=contract_id,
+                ob_type=ObligationType.TYPE_C_CONDITIONAL,
+                details=details,
+            ))
+            continue
+
+        # 通常の型はこれまでどおり必須キーの直接添字アクセスのまま
         # （キー不足ならKeyErrorで気づける）。
         obligations.append(Obligation(
             obligation_id=f"{contract_id}_OB{i + 1:02d}",
@@ -140,7 +159,7 @@ def create_contract(
             ob_type=ObligationType(term["ob_type"]),
             round_num=term.get("round_num"),
             vote_num=term.get("vote_num"),
-            details=dict(term.get("details", {})),
+            details=details,
         ))
 
     return Contract(

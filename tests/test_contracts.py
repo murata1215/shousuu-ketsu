@@ -59,6 +59,38 @@ def test_sign_contract_establishes_on_last_signature() -> None:
     assert contract.status == ContractStatus.ACTIVE
 
 
+def test_create_contract_strips_stray_fields_from_pool_share_term() -> None:
+    """
+    pool_shareの項にobligor・counterparty・round_num・vote_num・conditionが
+    書かれていても、create_contractは捨ててObligationを作る（§6.4/§9.3、
+    サイクル5.0a）。
+
+    validate_termsは書かれていても無視して「不成立にはしない」だけで、
+    実際にそれらを捨てるのはcreate_contractの役割。捨てずにそのまま
+    Obligationへ渡すと内部検査（山分けはこれらを持たない）に落ちて例外に
+    なっていた不具合（本番試合t12_r4_4501bで実際に発生）の再発防止。
+    """
+    contract = create_contract(
+        "P01", ["P01", "P02", "P03"],
+        terms=[{
+            "obligor": "P01", "counterparty": "P02", "round_num": 3, "vote_num": 2,
+            "ob_type": "type_c_conditional",
+            "details": {
+                "share_percent": 60, "condition_type": "pool_share",
+                "condition": {"target_player": "P01"},
+            },
+        }],
+        round_created=1, vote_created=1, contract_id="C_TEST0004",
+    )
+    ob = contract.obligations[0]
+    assert ob.obligor is None
+    assert ob.counterparty is None
+    assert ob.round_num is None
+    assert ob.vote_num is None
+    assert "condition" not in ob.details
+    assert ob.details == {"share_percent": 60, "condition_type": "pool_share"}
+
+
 def test_sign_contract_rejects_non_party_or_duplicate() -> None:
     contract = create_contract(
         "P01", ["P01", "P07"], terms=[], round_created=1, vote_created=1, contract_id="C_TEST0003",

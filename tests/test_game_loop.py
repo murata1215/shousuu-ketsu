@@ -12,13 +12,17 @@
 
 import inspect
 
+import pytest
+
 from bots import BOT_REGISTRY, DEFAULT_ROSTER
+from engine import contracts as contract_ops
 from engine.config import GameConfig
 from engine.events import EventLogger
 from engine.game import Game
-from engine.models import Vote
+from engine.models import ContractProposeAction, PlayerState, Vote
 from engine.negotiation import PlayerAgent
-from tests.helpers import FailingCommitAgent, make_roster
+from llm.prompt_builder import build_negotiation_prompt
+from tests.helpers import FailingCommitAgent, ScriptedAgent, VisibleStateRecordingAgent, make_roster
 
 
 def _bot_roster(seed_offset: int = 0) -> dict:
@@ -259,3 +263,92 @@ def test_same_seed_produces_identical_result() -> None:
     result1 = run_once()
     result2 = run_once()
     assert result1.model_dump() == result2.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# 交渉1アクションの想定外の例外（§7.5、サイクル5.0a新設）
+# ---------------------------------------------------------------------------
+#
+# create_contractがpool_shareの余計な項目をそのまま渡して例外になり、本番
+# 試合t12_r4_4501bが停止した事故（engine/contracts.py::create_contractで
+# 直した）の再発防止。ここでは「契約を作る処理そのものが想定外の例外を
+# 出す」状況をmonkeypatchで再現し、ガードの挙動を確かめる
+# （実際の不具合はもう直っているため、再現には差し替えが必要）。
+
+def _contract_propose_action() -> ContractProposeAction:
+    """validate_action（validate_terms）は通る、ただの型A提案"""
+    return ContractProposeAction(
+        player_id="P01", with_players=["P02"],
+        terms=[{"obligor": "P01", "counterparty": "P02", "ob_type": "type_a_payment",
+                "round_num": 1, "details": {"amount": 100_000}}],
+    )
+
+
+def test_unexpected_action_error_raises_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """既定（continue_on_action_error=False）では、交渉1アクションの実行中の
+    想定外の例外がそのまま上がり、試合が止まる（Bot検証・テストで気づける）"""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated create_contract failure")
+
+    monkeypatch.setattr(contract_ops, "create_contract", _boom)
+
+    agents = make_roster({}, num_players=12)
+    agents["P01"].negotiate_actions[(1, 1, 1)] = _contract_propose_action()
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    game = Game(config=config, agents=agents, seed=1, logger=EventLogger())
+
+    with pytest.raises(RuntimeError, match="simulated create_contract failure"):
+        game.run()
+
+
+def test_unexpected_action_error_continues_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """continue_on_action_error=Trueでは、その行動だけ不成立にして試合を
+    続ける。記録（イベント・本人への理由）が残り、次の手番の文面に
+    日本語の不成立の理由が出る"""
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated create_contract failure")
+
+    monkeypatch.setattr(contract_ops, "create_contract", _boom)
+
+    agents = make_roster({}, num_players=12)
+    agents["P01"] = ScriptedAgent(
+        "P01", negotiate_actions={(1, 1, 1): _contract_propose_action()},
+    )
+    rec01 = VisibleStateRecordingAgent(agents["P01"])
+    agents["P01"] = rec01
+    config = GameConfig.dev_small(num_players=12, num_rounds=1)
+    logger = EventLogger()
+    game = Game(
+        config=config, agents=agents, seed=1, logger=logger, continue_on_action_error=True,
+    )
+    result = game.run()  # 例外を出さずに最後まで進む
+    assert len(result.round_summaries) == 1
+
+    error_events = [
+        e for e in logger.events
+        if e.event_type == "NEGOTIATION_ACTION" and e.data.get("player_id") == "P01"
+        and e.data.get("success") is False and e.data.get("turn") == 1
+        and e.round_num == 1 and e.vote_num == 1
+    ]
+    assert len(error_events) == 1
+    assert error_events[0].data["error_type"] == "RuntimeError"
+    assert "simulated create_contract failure" in error_events[0].data["error"]
+    assert error_events[0].visibility == "spectator"
+
+    rejected_events = [
+        e for e in logger.events
+        if e.event_type == "CONTRACT_REJECTED" and e.data.get("player_id") == "P01" and e.data.get("turn") == 1
+    ]
+    assert len(rejected_events) == 1
+    assert rejected_events[0].visibility == "self"
+
+    # 本人の次の手番（turn=2、passする前）の文面に、日本語の不成立の理由が
+    # 出る（例外の生の文字列ではなく、RejectReason.INTERNAL_ERRORの定型文）
+    turn2_visible_state = next(
+        vs for (rn, vn, turn, vs) in rec01.negotiate_snapshots if rn == 1 and vn == 1 and turn == 2
+    )
+    prompt = build_negotiation_prompt(
+        PlayerState(player_id="P01", cash=0, initial_loan=0), 1, 1, 2, turn2_visible_state, config,
+    )
+    assert "処理の途中で問題が起きた" in prompt.text
+    assert "simulated create_contract failure" not in prompt.text
