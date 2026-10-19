@@ -1,0 +1,6 @@
+{
+  "P01": "claude-opus-5",
+  "P02": "gpt-4.1-mini",
+  "P03": "grok-4.3",
+  "P04": "gemini-3.5-flash-lite"
+}

@@ -9,6 +9,8 @@ dependencies = [
     "fastapi>=0.141.1",
     "httpx>=0.28.1",
     "openai>=2.53.0",
+    "pillow>=12.3.0",
+    "playwright==1.62.0",
     "pytest>=9.1.1",
     "python-dotenv>=1.2.2",
     "uvicorn>=0.52.1",
