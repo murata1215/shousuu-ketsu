@@ -52,6 +52,10 @@ def _build_game_record(seed: int, agents: dict, game: Game, result) -> dict[str,
         ]
         rounds.append({
             "round_num": rs.round_num, "aborted": rs.aborted,
+            # サイクル7.0: 投票がmax_votes_per_round回に達しても決着しなかった
+            # ための打ち切りか（12人設定では常にFalse。第2戦18体のBot検証で
+            # 「6回で流れた割合」を数えるために追加した）。
+            "vote_cap_forced": rs.vote_cap_forced,
             "winner_ids": list(rs.winner_ids), "payout_per_winner": rs.payout_per_winner,
             "carryover_in": rs.carryover_in, "carryover_out": rs.carryover_out,
             "destroyed_pot": rs.destroyed_pot, "pot_final": rs.pot_final,
@@ -124,6 +128,7 @@ def common_stats(games: list[dict]) -> dict:
     total_votes = 0
     retry_votes = 0
     aborted_rounds = 0
+    vote_cap_forced_rounds = 0
     one_winner_rounds = 0
     two_winner_rounds = 0
     vote_count_dist: dict[str, int] = defaultdict(int)
@@ -147,6 +152,8 @@ def common_stats(games: list[dict]) -> dict:
             retry_votes += sum(1 for v in r["votes"] if v["result"] == "retry")
             if r["aborted"]:
                 aborted_rounds += 1
+                if r.get("vote_cap_forced"):
+                    vote_cap_forced_rounds += 1
             elif len(r["winner_ids"]) == 1:
                 one_winner_rounds += 1
             elif len(r["winner_ids"]) == 2:
@@ -167,6 +174,9 @@ def common_stats(games: list[dict]) -> dict:
         ),
         "retry_ratio": retry_votes / total_votes if total_votes else 0.0,
         "abort_ratio": aborted_rounds / total_rounds if total_rounds else 0.0,
+        # サイクル7.0: 打ち切りのうち「投票がmax_votes_per_round回に達しても
+        # 決着しなかった」ための割合（分母は全ラウンド数。12人設定では常に0.0）。
+        "vote_cap_forced_ratio": vote_cap_forced_rounds / total_rounds if total_rounds else 0.0,
         "one_winner_ratio": one_winner_rounds / total_rounds if total_rounds else 0.0,
         "two_winner_ratio": two_winner_rounds / total_rounds if total_rounds else 0.0,
         "final_assets_max": max(final_assets_all) if final_assets_all else 0,

@@ -63,6 +63,26 @@ def _v1(seed: int) -> dict[str, RecordingAgent]:
 
 
 # ---------------------------------------------------------------------------
+# V1_18p: 18人とも無作為（サイクル7.0新設。第2戦18体のBot検証用）
+#
+# PLAYER_IDS（12人固定）・GROUP_A/B/C等のグループ定義・V2〜V11のビルダーには
+# 一切触れない独立したシナリオ（CLAUDE.md落とし穴⑨: 人数という前提が変わる
+# 拡張は、既存のものを書き換えず名前も変えて新規に作る）。build_agents()・
+# config_for()がscenario_key=="V1_18p"のときだけ18人用のPLAYER_IDS_18P・
+# GameConfigを使う（他の全シナリオキーの挙動・結果は1件も変えない）。
+# ---------------------------------------------------------------------------
+
+PLAYER_IDS_18P: list[str] = [f"P{i:02d}" for i in range(1, 19)]
+
+
+def _v1_18p(seed: int) -> dict[str, RecordingAgent]:
+    return {
+        pid: RecordingAgent(RandomVoteBot(seed=_bot_seed(seed, pid)), "Random")
+        for pid in PLAYER_IDS_18P
+    }
+
+
+# ---------------------------------------------------------------------------
 # V2: 4人組1つ＋無作為8人
 # ---------------------------------------------------------------------------
 
@@ -240,6 +260,7 @@ def _ties_overrides(max_consecutive_ties: int) -> dict[str, Any]:
 
 SCENARIOS: dict[str, Scenario] = {
     "V1": Scenario("V1", _v1, note="12人とも無作為（基準）"),
+    "V1_18p": Scenario("V1_18p", _v1_18p, note="18人とも無作為（第2戦18体・V1の18人版）"),
     "V2": Scenario("V2", _v2, note="4人組1つ＋無作為8人"),
     "V3g2": Scenario("V3g2", lambda seed: _v3(seed, 2), note="組の人数2人"),
     "V3g3": Scenario("V3g3", lambda seed: _v3(seed, 3), note="組の人数3人"),
@@ -289,26 +310,37 @@ SCENARIO_KEYS: list[str] = list(SCENARIOS.keys())
 
 
 def config_for(scenario_key: str) -> GameConfig:
-    """シナリオキーから、設定値の上書きを反映したGameConfigを返す"""
+    """シナリオキーから、設定値の上書きを反映したGameConfigを返す
+
+    サイクル7.0: "V1_18p"だけは18人分のGameConfig（dev_small(num_players=18)。
+    max_votes_per_round等その他の設定値はdefault_12()と同一）を土台にする。
+    他の全キーはdefault_12()のまま（1件も変更しない）。
+    """
     scenario = SCENARIOS[scenario_key]
-    return GameConfig.default_12().model_copy(update=scenario.config_overrides)
+    base = (
+        GameConfig.dev_small(num_players=18, num_rounds=4)
+        if scenario_key == "V1_18p"
+        else GameConfig.default_12()
+    )
+    return base.model_copy(update=scenario.config_overrides)
 
 
 def build_agents(scenario_key: str, seed: int) -> tuple[dict[str, RecordingAgent], GameConfig]:
     """
-    シナリオキーとシードから、12人分のRecordingAgentと設定を構築する
+    シナリオキーとシードから、プレイヤー分のRecordingAgentと設定を構築する
 
     Args:
         scenario_key: SCENARIO_KEYS のいずれか
         seed: 試合シード（Bot固有シードはここから導出。GameRngのseedとは別軸）
 
     Returns:
-        (player_id -> RecordingAgent の辞書（ちょうど12人）, GameConfig)
+        (player_id -> RecordingAgent の辞書（"V1_18p"は18人、他は12人ちょうど）, GameConfig)
     """
     if scenario_key not in SCENARIOS:
         raise ValueError(f"Unknown scenario key: {scenario_key!r} (valid: {SCENARIO_KEYS})")
     scenario = SCENARIOS[scenario_key]
     agents = scenario.build(seed)
-    if set(agents) != set(PLAYER_IDS):
-        raise AssertionError(f"{scenario_key}: agents must cover exactly {PLAYER_IDS}, got {sorted(agents)}")
+    expected_ids = PLAYER_IDS_18P if scenario_key == "V1_18p" else PLAYER_IDS
+    if set(agents) != set(expected_ids):
+        raise AssertionError(f"{scenario_key}: agents must cover exactly {expected_ids}, got {sorted(agents)}")
     return agents, config_for(scenario_key)

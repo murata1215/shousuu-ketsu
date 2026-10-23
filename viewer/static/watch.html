@@ -729,8 +729,14 @@ function renderTimelineItem(item, voteNum) {
     }
     case 'extension_fee':
       return `<div class="tl-item" data-line="${item.line}"><span class="tl-kind-tag tag-pay">延長料</span>${escapeHtml(seatLabel(item.player_id))}: ${yen(item.paid)}${item.borrowed ? `（借入 ${yen(item.borrowed)}）` : ''}</div>`;
-    case 'round_aborted':
-      return `<div class="tl-item" data-line="${item.line}"><span class="accident-badge">打ち切り</span>やり直しが${item.consecutive_ties}回連続</div>`;
+    case 'round_aborted': {
+      // サイクル7.0: reason="vote_cap"（投票が上限回数に達しても決着しない）を
+      // reason="consecutive_ties"（既定: やり直しが連続）と区別して表示する。
+      const abortText = item.reason === 'vote_cap'
+        ? `投票が${item.max_votes_per_round}回に達し、決着しないまま打ち切り`
+        : `やり直しが${item.consecutive_ties}回連続`;
+      return `<div class="tl-item" data-line="${item.line}"><span class="accident-badge">打ち切り</span>${abortText}</div>`;
+    }
     case 'contract_payment':
       return `<div class="tl-item" data-contract="${escapeHtml(item.contract_id)}" data-line="${item.line}">
         <span class="tl-kind-tag tag-pay">契約決済${item.condition_type === 'pool_share' ? '（山分け）' : ''}</span>
@@ -764,8 +770,13 @@ function renderVoteTabs(votes) {
 
 function renderRoundSettlement(rs) {
   if (!rs || !rs.resolved) return '<p class="split-label">このラウンドの精算はまだ記録されていません</p>';
+  // サイクル7.0: abort_reason="vote_cap"（投票が上限回数に達しても決着しない）を
+  // 既定の"consecutive_ties"（やり直しが連続）と区別して表示する。
+  const abortCause = rs.abort_reason === 'vote_cap'
+    ? `投票が${rs.abort_max_votes_per_round}回に達し、決着しないまま打ち切り`
+    : '打ち切り（やり直しが連続）';
   const winnerText = rs.aborted
-    ? `打ち切り（やり直しが連続）。山 ${yen(rs.pot_final)} は${rs.carryover_out ? '次ラウンドへ持ち越し' : '没収'}`
+    ? `${abortCause}。山 ${yen(rs.pot_final)} は${rs.carryover_out ? '次ラウンドへ持ち越し' : '没収'}`
     : `勝ち残り: ${rs.winner_ids.map(p => escapeHtml(seatLabel(p))).join('・')} が ${yen(rs.payout_per_winner)}${rs.winner_ids.length > 1 ? '（1人あたり）' : '（単独勝ち）'}`;
   const payments = (rs.payments || []).map(p => `<li>${lineLink({game: currentGame, tab: 'round', round: currentRound}, p.line)}
     ${p.condition_type === 'pool_share' ? '<span class="ob-tag ob-c">山分け</span>' : `<span class="ob-tag ob-${p.ob_type === 'type_a_payment' ? 'a' : 'c'}">${OB_TYPE_LABEL[p.ob_type]||''}</span>`}
@@ -1038,7 +1049,11 @@ async function loadHighlights() {
     `R${h.round_num} ${escapeHtml(seatLabel(h.obligor))} → ${escapeHtml(seatLabel(h.counterparty))} ${yen(h.paid)}（${escapeHtml(h.contract_id)}）`,
     {...h, player_id: h.obligor}, 'pool')).join('');
   const retry = data.retries_and_aborts.map(h => highlightRow(h.kind === 'abort' ? '打ち切り' : 'やり直し',
-    `R${h.round_num}V${h.vote_num} ${h.kind === 'abort' ? `やり直し${h.consecutive_ties}回連続で打ち切り` : `延長料 合計${yen(h.extension_fee_collected)}`}`,
+    `R${h.round_num}V${h.vote_num} ${h.kind === 'abort'
+      ? (h.reason === 'vote_cap'
+          ? `投票が${h.max_votes_per_round}回に達し打ち切り`
+          : `やり直し${h.consecutive_ties}回連続で打ち切り`)
+      : `延長料 合計${yen(h.extension_fee_collected)}`}`,
     h, 'retry')).join('');
 
   body.innerHTML = `

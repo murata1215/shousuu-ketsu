@@ -1,17 +1,22 @@
 """
 ドライランスクリプト（動作確認用、§12の目視確認に対応、v0.4）
 
-12人×4ラウンド（L12R4V6）の試合を1本実行し、ラウンドごとの投票回数・
-やり直し・打ち切り・勝ち残りと山の額、最終資産・順位を表示する。
+12人×4ラウンド（L12R4V6、既定）の試合を1本実行し、ラウンドごとの投票回数・
+やり直し・打ち切り・勝ち残りと山の額、最終資産・順位を表示する。AIは呼ばない
+（StubAgent/bots/RandomContractBotのみ、費用0円）。
 
 サイクル4.0でv0.3から全面改訂した。v0.3は`tests.helpers.RandomContractAgent`
 を本番コードから逆方向にimportしていたが、v0.4では`bots.random_contract_bot
 .RandomContractBot`に移したためその依存を解消した。
 
+サイクル7.0: `--num-players`を追加した（既定12。第2戦18体のビューア表示確認用。
+人数以外のルールの数字は変えない）。
+
 使用方法:
     uv run python scripts/dry_run.py --seed 42
     uv run python scripts/dry_run.py --seed 42 --bots
     uv run python scripts/dry_run.py --seed 42 --contracts
+    uv run python scripts/dry_run.py --seed 42 --contracts --num-players 18 --bots
 """
 
 import argparse
@@ -89,9 +94,15 @@ def main() -> None:
         help="無作為に契約を提案・署名するRandomContractBotを使う（--botsと併用不可）",
     )
     parser.add_argument("--output", type=str, default=None, help="JSONLログ出力先パス")
+    parser.add_argument(
+        "--num-players", type=int, default=12,
+        help="プレイヤー数（既定12。サイクル7.0: 第2戦18体のビューア確認用に追加。"
+             "ルール上の数字(参加費・延長料等)は人数に応じてそのまま。12以外は"
+             "正式ロスターではない旨をファイル名に残す）",
+    )
     args = parser.parse_args()
 
-    config = GameConfig.default_12()
+    config = GameConfig.dev_small(num_players=args.num_players, num_rounds=4)
     agents = build_agents(config, args.bots, args.contracts)
     logger = EventLogger()
 
@@ -102,7 +113,7 @@ def main() -> None:
     else:
         agent_label = "StubAgent"
 
-    print("=== 少数決 ドライラン（v0.4 L12R4V6） ===")
+    print(f"=== 少数決 ドライラン（v0.4、L{config.num_players}R{config.num_rounds}V{config.max_votes_per_round}） ===")
     print(f"プレイヤー数: {config.num_players} / ラウンド数: {config.num_rounds} "
           f"/ 1ラウンド最大投票数: {config.max_votes_per_round}")
     print(f"参加費: {config.entry_fee:,}円 / 延長料: {config.extension_fee:,}円")
@@ -164,7 +175,7 @@ def main() -> None:
     if args.output:
         output_path = Path(args.output)
     else:
-        output_path = Path("logs/llm") / f"dry_run_seed{args.seed}_12p_events.jsonl"
+        output_path = Path("logs/llm") / f"dry_run_seed{args.seed}_{config.num_players}p_events.jsonl"
     logger.save_jsonl(output_path)
     print(f"\nJSONLログ出力: {output_path}")
     print(f"イベント数: {len(logger.events)}")

@@ -18,7 +18,7 @@ from sim.metrics import (
     collect_raw, common_stats, group_stats, loan_stats, oversell_stats, type_b_break_value_estimate,
     type_b_pact_stats,
 )
-from sim.scenarios import GROUP_A, GROUP_B, GROUP_C, HUB_GROUPS, SCENARIO_KEYS, config_for
+from sim.scenarios import GROUP_A, GROUP_B, GROUP_C, HUB_GROUPS, PLAYER_IDS_18P, SCENARIO_KEYS, config_for
 
 _V1_N1000_PATH = Path(__file__).resolve().parent.parent / "data" / "sim_v0_4" / "V1_seed1_n1000.json"
 
@@ -30,12 +30,14 @@ NO_CONTRACT_SCENARIOS = ["V1", "V9", "V9_post10"]
 
 @pytest.mark.parametrize("scenario_key", SCENARIO_KEYS)
 def test_scenario_runs_n_games_and_completes(scenario_key: str) -> None:
+    # サイクル7.0: "V1_18p"だけ18人（第2戦18体のBot検証用）。他は全て12人のまま。
+    expected_ids = set(PLAYER_IDS_18P) if scenario_key == "V1_18p" else {f"P{i:02d}" for i in range(1, 13)}
     raw = collect_raw(scenario_key, games=5, seed_start=1)
     assert raw["n_games"] == 5
     assert len(raw["games"]) == 5
     for record in raw["games"]:
-        assert len(record["rounds"]) == 4  # L12R4V6: 4ラウンド固定
-        assert set(record["final_assets"]) == {f"P{i:02d}" for i in range(1, 13)}
+        assert len(record["rounds"]) == 4  # R4固定（人数設定に関わらず）
+        assert set(record["final_assets"]) == expected_ids
 
     stats = common_stats(raw["games"])
     assert stats["n_games"] == 5
@@ -188,3 +190,56 @@ def test_v5_all_three_groups_always_tie_6_against_6_and_abort() -> None:
     assert stats["abort_ratio"] == 1.0
     for record in raw["games"]:
         assert record["contract_payments"] == []
+
+
+# ---------------------------------------------------------------------------
+# V1_18p: 18人とも無作為（サイクル7.0新設・第2戦18体のBot検証用）
+# ---------------------------------------------------------------------------
+
+def test_v1_18p_config_has_18_players_and_unchanged_other_settings() -> None:
+    """V1_18pのGameConfigは18人・4ラウンドで、max_votes_per_round等その他の
+    設定値はdefault_12()と同じ（18人への拡張でルールの数字は変えない）"""
+    config = config_for("V1_18p")
+    config_12 = config_for("V1")
+    assert config.num_players == 18
+    assert config.num_rounds == 4
+    assert config.max_votes_per_round == config_12.max_votes_per_round == 6
+    assert config.survivors_max == config_12.survivors_max
+    assert config.max_consecutive_ties == config_12.max_consecutive_ties
+    assert config.entry_fee == config_12.entry_fee
+
+
+def test_v1_18p_runs_18_players_without_touching_v1_12p() -> None:
+    """V1_18pの追加がV1（12人）の結果に一切影響しないことを確認する
+    （既存scenarios.pyのPLAYER_IDS・V1ビルダーは変更していない）"""
+    raw_18p = collect_raw("V1_18p", games=5, seed_start=1)
+    for record in raw_18p["games"]:
+        assert set(record["final_assets"]) == set(PLAYER_IDS_18P)
+
+    raw_12p = collect_raw("V1", games=5, seed_start=1)
+    for record in raw_12p["games"]:
+        assert set(record["final_assets"]) == {f"P{i:02d}" for i in range(1, 13)}
+        for r in record["rounds"]:
+            assert r["vote_cap_forced"] is False  # 12人では構造上起きない
+
+
+def test_common_stats_reports_vote_cap_forced_ratio_key() -> None:
+    """common_statsが"vote_cap_forced_ratio"を返し、12人では常に0.0であること"""
+    raw = collect_raw("V1", games=5, seed_start=1)
+    stats = common_stats(raw["games"])
+    assert stats["vote_cap_forced_ratio"] == 0.0
+
+    raw_18p = collect_raw("V1_18p", games=5, seed_start=1)
+    stats_18p = common_stats(raw_18p["games"])
+    assert 0.0 <= stats_18p["vote_cap_forced_ratio"] <= 1.0
+
+
+def test_common_stats_vote_cap_forced_ratio_backward_compatible_with_old_raw() -> None:
+    """サイクル7.0以前の保存済み生データ（vote_cap_forcedキーが無い）でも
+    common_statsが落ちないこと（dict.get()でFalse扱いにフォールバックする）"""
+    raw = collect_raw("V1", games=2, seed_start=1)
+    for record in raw["games"]:
+        for r in record["rounds"]:
+            del r["vote_cap_forced"]  # 旧形式を模す
+    stats = common_stats(raw["games"])
+    assert stats["vote_cap_forced_ratio"] == 0.0

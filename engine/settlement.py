@@ -373,7 +373,11 @@ def settle_vote(
     if outcome.result == "abort":
         logger.log(
             "ROUND_ABORTED", round_num, "settlement", vote_num=vote_num, visibility="public",
-            data={"consecutive_ties": outcome.consecutive_ties_after},
+            # reason="consecutive_ties": やり直しがmax_consecutive_ties回続いた打ち切り
+            # （既定の打ち切り。サイクル7.0で、投票上限到達による打ち切り
+            # (reason="vote_cap", engine/game.py::_run_round内で別途記録)と
+            # 区別するためreasonを追加した）。
+            data={"reason": "consecutive_ties", "consecutive_ties": outcome.consecutive_ties_after},
         )
 
     # --- 手順3: 型Bの監査／手順4: 型Cの投票単位条件判定 ---

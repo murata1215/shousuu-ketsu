@@ -559,6 +559,328 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         tier="",
         devrelay_ai="codex",
     ),
+
+    # ================= サイクル7.0: 第2戦（18体）ロスター =================
+    # 6社×ハイ・ミドル・ローの18席。既存のH1〜L7・DR_*・TERRA・K25_EVAL・
+    # M3_G37_EVALは1件も変更しない（第1戦の記録の再現性を保つため）。
+    # 単価・考えさせない設定は2026-10-23にサイクル7.0で各社APIを実測して確定した
+    # （doc/devlog/の本サイクルの記録を参照）。ロスター名"L18_S2"は
+    # scripts/llm_trial.py::NAMED_ROSTERSで18キーに展開する。
+
+    # --- Anthropic（API直結、4席）---
+    # 実測: anthropic SDK 1.11.0のMessages.create()にtemperatureパラメータが
+    # そもそも存在しない（inspect.signatureで確認。H1/M1/L1と同じSDK制約であり
+    # モデル固有の制限ではない）。4席ともsupports_temperature=False。
+    "S2_AN_H1": ModelInfo(
+        model_id="claude-fable-5-1",
+        provider="Anthropic", name="Claude Fable 5.1 (S2 High)",
+        adapter_type="anthropic",
+        input_price=10.0, output_price=50.0,  # Anthropic公式料金表 2026-10-23確認
+        env_key="CLAUDE_API_KEY", base_url=None,
+        supports_temperature=False,
+        cached_input_price=0.25,  # 公式: cache hitは base inputの0.025倍
+        # 実測2026-10-23: thinking.type="disabled"は400
+        # （"thinking.type.disabled" is not supported for this model.
+        #  Use "thinking.type.adaptive" and "output_config.effort"）。
+        # Fable 5.1は常時思考（無効化不可）。effort="low"でも思考0トークンには
+        # ならない場合がある（けいすけさん決定2: 完全に0でなくてよい）。
+        extra_params={"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}},
+        # 常時思考のモデルのため既定60秒より長めに取る（暫定値。Step3の実測で見直す）。
+        timeout_seconds=120,
+        tier="H",
+    ),
+    "S2_AN_H2": ModelInfo(
+        model_id="claude-opus-5-5",
+        provider="Anthropic", name="Claude Opus 5.5 (S2 High)",
+        adapter_type="anthropic",
+        input_price=4.0, output_price=20.0,  # Anthropic公式料金表 2026-10-23確認
+        env_key="CLAUDE_API_KEY", base_url=None,
+        supports_temperature=False,
+        cached_input_price=0.20,  # 公式: cache hitは base inputの0.05倍
+        # 実測2026-10-23: thinking.type="disabled"は400（Fable 5.1と同じ本文）。
+        # effort="low"実測でも思考22トークン観測（完全に0にはならない。
+        # けいすけさん決定2: それで良い）。effortの既定はmedium（Opus 5と違う）。
+        extra_params={"thinking": {"type": "adaptive"}, "output_config": {"effort": "low"}},
+        timeout_seconds=120,
+        tier="H",
+    ),
+    "S2_AN_M": ModelInfo(
+        model_id="claude-sonnet-5-5",
+        provider="Anthropic", name="Claude Sonnet 5.5 (S2 Middle)",
+        adapter_type="anthropic",
+        input_price=2.0, output_price=10.0,  # Anthropic公式料金表 2026-10-23確認
+        env_key="CLAUDE_API_KEY", base_url=None,
+        supports_temperature=False,
+        cached_input_price=0.10,
+        # 実測2026-10-23: thinking.type="disabled"は400。このモデルは
+        # "between_tools"で思考を止める（本文: To turn thinking off on this
+        # model, send "thinking": {"type": "between_tools"}）。思考0トークン実測。
+        extra_params={"thinking": {"type": "between_tools"}},
+        tier="M",
+    ),
+    "S2_AN_L": ModelInfo(
+        model_id="claude-haiku-5-5",
+        provider="Anthropic", name="Claude Haiku 5.5 (S2 Low)",
+        adapter_type="anthropic",
+        input_price=0.10, output_price=0.50,  # Anthropic公式料金表 2026-10-23確認
+        # プロンプト長が10万トークンを超えると単価5倍（0.50/2.50）になる段階
+        # 料金だが、本プロジェクトの手番は15,000字上限（TURN_PROMPT_MAX_CHARS）
+        # のため超えない前提。超えた場合は費用上限（game_cost_budget）で
+        # 事前に止まる設計のため実害は無い。
+        env_key="CLAUDE_API_KEY", base_url=None,
+        supports_temperature=False,
+        cached_input_price=0.01,
+        extra_params={"thinking": {"type": "disabled"}},  # 実測2026-10-23: 通る
+        tier="L",
+    ),
+
+    # --- OpenAI（DevRelay/Codex経路、3席）---
+    # Codex CLIを0.147.0→0.163.0に更新（サイクル7.0、本サイクルで実施）後、
+    # ~/.codex/models_cache.jsonにgpt-6-astra/gpt-6-sol/gpt-6-lunaが
+    # visibility=list・supported_in_api=trueで掲載されていることを確認。
+    # `codex exec -m <各モデル>`で実際に応答も確認済み（3モデルとも成功）。
+    # DevRelay側はモデル名の許可リストを持たないため（devrelay_ai="codex"を
+    # 明示送信するだけ）、Codexが知っているモデル名なら素通しで動く見込み。
+    # billing="subscription"のため入力・出力単価は0（このプロジェクトの
+    # API課金は発生しない。DR_TERRA/DR_SOL/DR_LUNAと同じ契約）。
+    "S2_OA_H": ModelInfo(
+        model_id="devrelay/gpt-6-astra",
+        provider="OpenAI", name="GPT-6 Astra (S2 High, DevRelay/Codex)",
+        adapter_type="devrelay_http",
+        input_price=0.0, output_price=0.0,
+        env_key="DEVRELAY_TOKEN", base_url=None,
+        timeout_seconds=180,
+        supports_temperature=False,
+        billing="subscription",
+        tier="H",
+        devrelay_ai="codex",
+    ),
+    "S2_OA_M": ModelInfo(
+        model_id="devrelay/gpt-6-sol",
+        provider="OpenAI", name="GPT-6 Sol (S2 Middle, DevRelay/Codex)",
+        adapter_type="devrelay_http",
+        input_price=0.0, output_price=0.0,
+        env_key="DEVRELAY_TOKEN", base_url=None,
+        timeout_seconds=180,
+        supports_temperature=False,
+        billing="subscription",
+        tier="M",
+        devrelay_ai="codex",
+    ),
+    "S2_OA_L": ModelInfo(
+        model_id="devrelay/gpt-6-luna",
+        provider="OpenAI", name="GPT-6 Luna (S2 Low, DevRelay/Codex)",
+        adapter_type="devrelay_http",
+        input_price=0.0, output_price=0.0,
+        env_key="DEVRELAY_TOKEN", base_url=None,
+        timeout_seconds=180,
+        supports_temperature=False,
+        billing="subscription",
+        tier="L",
+        devrelay_ai="codex",
+    ),
+
+    # --- Google（API直結・OpenAI互換エンドポイント、3席）---
+    # 実測2026-10-23: reasoning_effort="none"で3モデルとも隠れた思考トークン
+    # （total-input-output）が0になることを確認（既定だとgemini-3.8-flashは
+    # 343トークン、effort="low"だとgemini-3.1-flash-liteで逆に126トークン
+    # 発生したため、3モデルとも"none"に統一する）。
+    "S2_GO_H": ModelInfo(
+        model_id="gemini-4-argon",
+        provider="Google", name="Gemini 4 Argon (S2 High)",
+        adapter_type="gemini",
+        input_price=2.0, output_price=10.0,
+        # Google公式 2026-10-23確認。導入価格は2026-11-30まで
+        # （以降 入力4.0/出力20.0/キャッシュ0.20へ倍増）。
+        env_key="GEMINI_API_KEY", base_url=GEMINI_OPENAI_BASE_URL,
+        cached_input_price=0.10,
+        extra_params={"reasoning_effort": "none"},
+        hidden_thinking_reserve_tokens=512,  # 実測0だが他Gemini系と同じ安全マージンを置く
+        tier="H",
+    ),
+    "S2_GO_M": ModelInfo(
+        model_id="gemini-3.8-flash",
+        provider="Google", name="Gemini 3.8 Flash (S2 Middle)",
+        adapter_type="gemini",
+        input_price=0.75, output_price=3.75,
+        # Google公式 2026-10-23確認。導入価格は2026-12-31まで
+        # （以降 入力1.50/出力7.50/キャッシュ0.15へ倍増）。
+        env_key="GEMINI_API_KEY", base_url=GEMINI_OPENAI_BASE_URL,
+        cached_input_price=0.075,
+        # 実測: 既定(effort未指定)だと隠れた思考343トークン発生 →
+        # reasoning_effort="none"で0トークンに抑制。
+        extra_params={"reasoning_effort": "none"},
+        hidden_thinking_reserve_tokens=512,
+        tier="M",
+    ),
+    "S2_GO_L": ModelInfo(
+        model_id="gemini-3.1-flash-lite",
+        provider="Google", name="Gemini 3.1 Flash-Lite (S2 Low)",
+        adapter_type="gemini",
+        input_price=0.30, output_price=2.50,  # Google公式 2026-10-23確認。値上げ予定なし
+        env_key="GEMINI_API_KEY", base_url=GEMINI_OPENAI_BASE_URL,
+        cached_input_price=0.03,
+        # 実測: effort="low"だと逆に隠れた思考126トークン発生したため"none"を採用。
+        extra_params={"reasoning_effort": "none"},
+        hidden_thinking_reserve_tokens=512,
+        tier="L",
+    ),
+
+    # --- xAI（API直結、3席）---
+    # grok-4.1-fastは実測2026-10-23で404（"does not exist or your team does
+    # not have access to it"）のため不採用（けいすけさん決定3でロー候補を
+    # grok-4.20-0309-non-reasoningに変更）。
+    "S2_XA_H": ModelInfo(
+        model_id="grok-4.7",
+        provider="xAI", name="Grok 4.7 (S2 High)",
+        adapter_type="openai_compat",
+        input_price=2.0, output_price=6.0,  # xAI一覧API実測価格 2026-10-23（$/1Mに変換済み）
+        env_key="GROK_API_KEY", base_url="https://api.x.ai/v1",
+        cached_input_price=0.50,
+        tier="H",
+        # 常時思考・無効化不可（grok-4.5/4.6と同じ系列）。トリビアルな1コール
+        # 実測ではreasoning_tokens=101だが、実際の交渉文面での実測はまだ無い。
+        # H4(grok-4.6)が最終的に辿り着いた値(9728)を暫定で流用し、Step3の
+        # 実測で見直す（provider保証の上限ではない）。
+        hidden_thinking_reserve_tokens=9728,
+        timeout_seconds=180,  # H4と同じ理由（常時思考モデルは60秒の壁に当たりやすい）
+    ),
+    "S2_XA_M": ModelInfo(
+        model_id="grok-4.3",
+        provider="xAI", name="Grok 4.3 (S2 Middle)",
+        adapter_type="openai_compat",
+        # 既存L4（model_id="grok-4.3"）と同一モデル・同一単価・同一設定で
+        # S2のミドル席として再登録。L4は変更しない（get_model()のmodel_id
+        # 逆引きはL4が先勝ちするが、設定が同一のため実害なし。CLAUDE.md
+        # 落とし穴19と同種の確認観点：このS2登録自体はvalidate_terms型の
+        # 検査ではないため該当しないが、念のため同一性を明記する）。
+        input_price=1.25, output_price=2.50,
+        env_key="GROK_API_KEY", base_url="https://api.x.ai/v1",
+        cached_input_price=0.20,
+        hidden_thinking_reserve_tokens=768,  # L4と同じ実測ベースの値
+        tier="M",
+    ),
+    "S2_XA_L": ModelInfo(
+        model_id="grok-4.20-0309-non-reasoning",
+        provider="xAI", name="Grok 4.20 (non-reasoning) (S2 Low)",
+        adapter_type="openai_compat",
+        input_price=1.25, output_price=2.50,  # xAI一覧API実測価格 2026-10-23
+        env_key="GROK_API_KEY", base_url="https://api.x.ai/v1",
+        cached_input_price=0.20,
+        # 非推論版のため思考トークンは実測0。hidden_thinking_reserve_tokens不要。
+        tier="L",
+    ),
+
+    # --- Moonshot（API直結、3席）---
+    # K2.5は公式API一覧から消えている（実測2026-10-23確認、想定どおり）。
+    "S2_MO_H": ModelInfo(
+        model_id="kimi-k3",
+        provider="Moonshot", name="Kimi K3 (S2 High)",
+        adapter_type="openai_compat",
+        # 既存H5（model_id="kimi-k3"）と同一モデル・同一単価・同一設定で
+        # S2のハイ席として再登録。H5は変更しない。
+        input_price=3.0, output_price=15.0,
+        env_key="KIMI_API_KEY", base_url=MOONSHOT_BASE_URL,
+        timeout_seconds=90,
+        extra_params={"thinking": {"type": "disabled"}},  # 実測2026-10-23: 通る
+        temperature_override=0.6,
+        tier="H",
+    ),
+    "S2_MO_M": ModelInfo(
+        model_id="kimi-k2.7-code",
+        provider="Moonshot", name="Kimi K2.7 Code (S2 Middle)",
+        adapter_type="openai_compat",
+        input_price=0.95, output_price=4.0,
+        # 公式料金ページ（platform.kimi.ai/docs/pricing/chat）は取得時点
+        # （2026-10-23）で価格表が空（ブラウザ描画のみ）だったため、二次資料
+        # （requesty.ai等、複数サイトが$0.95/$4.00で一致）を出典とする。
+        # cached_input_priceの0.19も同じ二次資料のみで未確認。
+        env_key="KIMI_API_KEY", base_url=MOONSHOT_BASE_URL,
+        cached_input_price=0.19,
+        timeout_seconds=90,
+        # 実測2026-10-23: thinkingを明示的に無効化しようとすると400
+        # （"invalid thinking: only type=enabled is allowed for this model"）。
+        # さらにthinkingキーを一切送らなくても温度0.7で400になる（常時思考が
+        # 既定で有効なため）。よってextra_paramsでthinking.type="enabled"を
+        # 明示し、adapters.py::_thinking_enabled_payload()にTrueと判定させ、
+        # THINKING_TEMPERATURE_LOCKED_PROVIDERS経由でtemperature=1.0へ
+        # 自動ロックさせる（けいすけさん決定4: 思考OFF不可のまま採用）。
+        # reasoning_tokensはOpenAI系と同じでcompletion_tokens内に含まれる
+        # ため二重計上は無い（hidden_thinking_reserve_tokens不要）。
+        extra_params={"thinking": {"type": "enabled"}},
+        tier="M",
+    ),
+    "S2_MO_L": ModelInfo(
+        model_id="kimi-k2.6",
+        provider="Moonshot", name="Kimi K2.6 (S2 Low)",
+        adapter_type="openai_compat",
+        # 既存M5/L5（model_id="kimi-k2.6"）と同一モデル・同一単価・同一設定で
+        # S2のロー席として再登録。M5/L5は変更しない。
+        input_price=0.95, output_price=4.0,
+        env_key="KIMI_API_KEY", base_url=MOONSHOT_BASE_URL,
+        timeout_seconds=90,
+        extra_params={"thinking": {"type": "disabled"}},
+        temperature_override=0.6,
+        tier="L",
+    ),
+
+    # --- DeepSeek（API直結、2席。ミドルは存在しないため2席のまま）---
+    # 公式料金ページ（api-docs.deepseek.com/quick_start/pricing）実測確認
+    # 2026-10-23。既存H6/M6/L6の単価（0.435/0.87・0.14/0.28）は古い値だが、
+    # けいすけさん決定5により既存エントリは変更せず、新しい席だけ公式の
+    # 新単価を使う。model_idはH6と重複する（"deepseek-v4-pro"）が、値が
+    # 異なる（H6は旧単価のまま）。get_model()のmodel_id逆引きはH6が先勝ち
+    # するため、model_idの生文字列からの逆引きが必要な場面（viewer/log_parser.py・
+    # blog/seats.pyの表示用途のみで、金額はそこでは使っていないことを確認済み）
+    # ではH6の旧ラベルが出る可能性があるが、実際の対局（llm_trial.py）は
+    # --rosterで渡した登録キー（"S2_DS_H"等）を直接使うため、実際の課金・
+    # 費用上限の計算には影響しない。
+    #
+    # オフピーク/ピークの2段料金（ピークはUTC 01:00-04:00・06:00-10:00の
+    # 平日=JST 10-13時・15-19時で2倍）はModelInfoが単一価格のため未モデル化。
+    # 既存レジストリの他モデルも長文帯等の複数価格を単一価格で簡略化している
+    # のと同じ扱い（例: H3のコメント参照）。
+    "S2_DS_H": ModelInfo(
+        model_id="deepseek-v4-pro",
+        provider="DeepSeek", name="DeepSeek V4 Pro (S2 High)",
+        adapter_type="openai_compat",
+        input_price=0.66, output_price=1.98,  # 公式オフピーク価格
+        env_key="DEEPSEEK_API_KEY", base_url="https://api.deepseek.com",
+        cached_input_price=0.022,
+        extra_params={"thinking": {"type": "disabled"}},  # 実測2026-10-23: 通る
+        max_tokens=2000,
+        tier="H",
+    ),
+    "S2_DS_L": ModelInfo(
+        model_id="deepseek-flash",
+        provider="DeepSeek", name="DeepSeek Flash (S2 Low)",
+        adapter_type="openai_compat",
+        # "deepseek-flash"は既存M6/L6の"deepseek-v4-flash"とは別の文字列
+        # （DeepSeek公式一覧APIの実在モデル名はdeepseek-flashとdeepseek-v4-pro
+        # の2つのみ。deepseek-v4-flash/deepseek-chatはそのエイリアス）。
+        # model_idの重複は無い。
+        input_price=0.15, output_price=0.60,  # 公式オフピーク価格
+        env_key="DEEPSEEK_API_KEY", base_url="https://api.deepseek.com",
+        cached_input_price=0.003,
+        extra_params={"thinking": {"type": "disabled"}},  # 実測2026-10-23: 通る
+        max_tokens=2000,
+        tier="L",
+    ),
+}
+
+# サイクル7.0: 第2戦の18席ロスターを1つの名前で呼べるようにする。
+# scripts/llm_trial.py::parse_roster()の手前でこの辞書を展開する
+# （"--roster L18_S2" も "--roster S2_AN_H1,..." の直書きも両方通る）。
+# 社ごとにH→M→Lの順、6社の並びはVENDOR_ORDERに合わせる。
+NAMED_ROSTERS: dict[str, list[str]] = {
+    "L18_S2": [
+        "S2_AN_H1", "S2_AN_H2", "S2_AN_M", "S2_AN_L",
+        "S2_OA_H", "S2_OA_M", "S2_OA_L",
+        "S2_GO_H", "S2_GO_M", "S2_GO_L",
+        "S2_XA_H", "S2_XA_M", "S2_XA_L",
+        "S2_MO_H", "S2_MO_M", "S2_MO_L",
+        "S2_DS_H", "S2_DS_L",
+    ],
 }
 
 

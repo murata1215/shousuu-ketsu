@@ -510,6 +510,9 @@ def get_round(log_dir: Path | list[Path], game_id: str, round_num: int, *, redac
         "forfeited_remainder": 0, "carryover_out": 0, "destroyed_pot": 0, "pot_final": 0,
         "payments": [], "interest": [], "shortfall_ids": [], "public_ranks": None,
         "resolved": False,
+        # サイクル7.0: ROUND_ABORTEDイベントがあれば"consecutive_ties"/"vote_cap"で
+        # 上書きされる（無ければ打ち切りではないラウンドなのでNoneのまま）。
+        "abort_reason": None, "abort_max_votes_per_round": None,
     }
 
     def _vote(vn: int) -> dict[str, Any]:
@@ -628,8 +631,19 @@ def get_round(log_dir: Path | list[Path], game_id: str, round_num: int, *, redac
                 "player_id": d.get("player_id"), "paid": d.get("paid"), "borrowed": d.get("borrowed"),
             })
         elif t == "ROUND_ABORTED":
-            v["timeline"].append({"line": line, "kind": "round_aborted", "turn": None,
-                                   "consecutive_ties": d.get("consecutive_ties")})
+            # reason: "consecutive_ties"（既定の打ち切り）または "vote_cap"
+            # （サイクル7.0新設。投票がmax_votes_per_round回に達しても決着しない
+            # 場合）。本サイクル以前の記録にはreasonが無いため、既定の
+            # "consecutive_ties" にフォールバックする（当時はそれしか無かった）。
+            reason = d.get("reason", "consecutive_ties")
+            v["timeline"].append({
+                "line": line, "kind": "round_aborted", "turn": None,
+                "consecutive_ties": d.get("consecutive_ties"),
+                "reason": reason,
+                "max_votes_per_round": d.get("max_votes_per_round"),
+            })
+            round_settlement["abort_reason"] = reason
+            round_settlement["abort_max_votes_per_round"] = d.get("max_votes_per_round")
         elif t == "TYPE_B_VIOLATION":
             v["timeline"].append({"line": line, "kind": "type_b_violation", "turn": None,
                                    "player_ids": d.get("player_ids", [])})

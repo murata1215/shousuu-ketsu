@@ -131,9 +131,14 @@ def retries_and_aborts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "consecutive_ties_after": d.get("consecutive_ties_after"),
             })
         elif t == "ROUND_ABORTED":
+            # reason: "consecutive_ties"（既定）または"vote_cap"（サイクル7.0新設）。
+            # 本サイクル以前の記録にはreasonが無いため"consecutive_ties"へ
+            # フォールバックする（viewer/log_parser.pyの同種の扱いと揃える）。
             out.append({
                 "line": e.get("_line"), "round_num": e.get("round_num"), "vote_num": e.get("vote_num"),
                 "kind": "abort", "consecutive_ties": d.get("consecutive_ties"),
+                "reason": d.get("reason", "consecutive_ties"),
+                "max_votes_per_round": d.get("max_votes_per_round"),
             })
     return out
 

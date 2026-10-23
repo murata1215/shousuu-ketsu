@@ -7,7 +7,11 @@
 
   ラウンド開始（全員が残っている人に戻る・参加費徴収・山の公開、§4.1/§7.1）
     → 投票を繰り返す（Open→Negotiation→Commit→Settlement、§7.2/§7.3）
-      → 決着して残り2人以下、または打ち切り（やり直し連続3回）でラウンド終了
+      → 決着して残り2人以下、または打ち切り（やり直し連続3回、またはサイクル
+        7.0で追加した「投票がmax_votes_per_round回に達しても決着しない」場合の
+        打ち切り。後者は12人設定（L12）では構造上起きない。18人以上の設定で
+        決着に3回以上かかる経路がある場合に備えた、けいすけさん決定によるルール
+        追加。_run_round内のvote_cap_forced_abort参照）でラウンド終了
     → ラウンドの精算（山の支払い・型C(wins_round)・型A、§7.4）
     → Finance（利息。R2のみ全員の順位を公開、§7.6）
 
@@ -248,16 +252,9 @@ class Game:
 
         vote_num = 0
         round_over = False
+        vote_cap_forced_abort = False
         while not round_over:
             vote_num += 1
-            if vote_num > self.config.max_votes_per_round:
-                # §4.4の決まりにより1ラウンドの投票は最大6回。12人設定では
-                # 構造的に起きないはずの状態（§11.2方針2.a。CLAUDE.md:
-                # 未定義の状態を黙って処理しない）。
-                raise AssertionError(
-                    f"R{round_num}: vote_num exceeded max_votes_per_round "
-                    f"({self.config.max_votes_per_round})",
-                )
 
             # 投票単位のリセット（§9.4、v0.4.3）。_phase_negotiationの中では
             # リセットしない（CLAUDE.md落とし穴⑪）。
@@ -298,13 +295,38 @@ class Game:
             self._last_vote_outcome = outcome
             round_over = outcome.round_over
 
+            # サイクル7.0（けいすけさん決定6、第2戦18体対応）: 投票が
+            # max_votes_per_round回に達しても決着しなければ、やり直しが
+            # max_consecutive_ties回続いた打ち切りと同じ扱いでこのラウンドを
+            # 流す（AssertionErrorにしない）。12人設定では構造的に起きない
+            # 状態だったが（§4.4は2回の決着で足りる前提）、18人設定では
+            # 決着に3回かかる経路があり得るため発生し得る。この投票自体の
+            # result（decisive/retry）・eliminated_ids/remaining_idsはそのまま
+            # 残す（§6.4の型C投票単位条件はすでに_phase_vote_settlement内で
+            # 判定済みのため、ここで書き換えると既に確定した契約判定と矛盾する）。
+            # round_overだけは「このラウンドはこの投票で終わった」という実際の
+            # 制御結果に合わせてTrueへ上書きする（round_overはどの契約条件からも
+            # 読まれない内部の制御フラグであり、書き換えても判定への影響は無い。
+            # 格納済みの_round_vote_outcomes[-1]も合わせて更新し、記録の整合性を保つ）。
+            if not round_over and vote_num >= self.config.max_votes_per_round:
+                round_over = True
+                vote_cap_forced_abort = True
+                outcome = outcome.model_copy(update={"round_over": True})
+                self._round_vote_outcomes[-1] = outcome
+                self._last_vote_outcome = outcome
+                self.logger.log(
+                    "ROUND_ABORTED", round_num, "settlement", vote_num=vote_num,
+                    visibility="public",
+                    data={"reason": "vote_cap", "max_votes_per_round": self.config.max_votes_per_round},
+                )
+
             if not round_over:
                 # 途中の投票（決着してラウンド続行、またはやり直し）の振り返り
                 # （§9.4）。この投票の精算の直後、ラウンドの精算・利息の前に行う。
                 self._phase_reflect(round_num, vote_num, is_round_end=False)
 
         votes_in_round = self._round_vote_outcomes
-        aborted = votes_in_round[-1].result == "abort"
+        aborted = votes_in_round[-1].result == "abort" or vote_cap_forced_abort
         round_settlement_shortfall_ids = sorted(
             self._phase_round_settlement(
                 round_num, votes_in_round, carryover_in, self._pot,
@@ -320,6 +342,7 @@ class Game:
             type_b_violator_ids=round_violator_ids,
             payment_shortfall_ids=round_shortfall_ids,
             round_settlement_shortfall_ids=round_settlement_shortfall_ids,
+            vote_cap_forced=vote_cap_forced_abort,
         )
         self._assert_cash_non_negative(round_num, None, "finance")
 
@@ -1101,6 +1124,7 @@ class Game:
         type_b_violator_ids: set[str],
         payment_shortfall_ids: set[str],
         round_settlement_shortfall_ids: list[str],
+        vote_cap_forced: bool = False,
     ) -> None:
         updated, interest_total, interest_by_player = execute_finance(
             self.players, round_num, self.config, self.logger,
@@ -1131,6 +1155,7 @@ class Game:
             "established_contract_seqs": sorted(self._round_established_seqs),
             "type_b_violator_ids": sorted(type_b_violator_ids),
             "payment_shortfall_ids": sorted(payment_shortfall_ids),
+            "vote_cap_forced": vote_cap_forced,
         })
 
         if round_num in self.config.rank_public_rounds:
@@ -1288,6 +1313,7 @@ class Game:
         return {
             "round_num": outcome.round_num,
             "aborted": outcome.aborted,
+            "vote_cap_forced": outcome.vote_cap_forced,
             "winner_ids": outcome.winner_ids,
             "payout_per_winner": outcome.payout_per_winner,
             "forfeited_remainder": outcome.forfeited_remainder,

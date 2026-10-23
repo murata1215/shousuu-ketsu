@@ -438,7 +438,16 @@ class RoundOutcome(BaseModel):
     """このラウンドの山の最終額（参加費1,200万＋延長料＋持ち越し、§4.5）"""
 
     aborted: bool
-    """打ち切りで終わったか（やり直しが連続max_consecutive_ties回、§4.4）"""
+    """打ち切りで終わったか（やり直しが連続max_consecutive_ties回、§4.4。または
+    サイクル7.0で追加した、投票がmax_votes_per_round回に達しても決着しない場合。
+    どちらが原因かは下のvote_cap_forcedで区別できる（公開イベントROUND_ABORTEDの
+    data["reason"]も同じ区別を持つ）"""
+
+    vote_cap_forced: bool = False
+    """サイクル7.0新設: 打ち切りの原因が「投票がmax_votes_per_round回に達しても
+    決着しない」ことだったか（Falseなら、打ち切りでないか、またはやり直し
+    連続max_consecutive_ties回による既定の打ち切り）。第2戦18体のBot検証で
+    「6回で流れた割合」を数えるために追加した（sim/metrics.py参照）"""
 
     winner_ids: list[str] = Field(default_factory=list)
     """勝ち残り（1人か2人）。打ち切りなら空（§4.5）"""

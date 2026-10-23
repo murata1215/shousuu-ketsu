@@ -80,6 +80,71 @@ def test_abort_carries_pot_to_next_round_then_decisive_payout() -> None:
     assert r2.carryover_out == 0
 
 
+def test_vote_cap_forces_round_abort_instead_of_assertion_error() -> None:
+    """サイクル7.0（けいすけさん決定6・第2戦18体対応）: 投票が
+    max_votes_per_round回に達しても決着しなければ、AssertionErrorではなく
+    やり直し連続打ち切りと同じ扱いでそのラウンドを流す。
+
+    7人・max_votes_per_round=1に縮小し、V1を4対3の決着（残り3人、
+    survivors_max=2を超えるため自然には終わらない）にすることで、12人の
+    既定設定では構造上起きないこの状態を小さく再現する。
+    """
+    # 4対3: YES(P01-P04)が多数派で退場、NO(P05-P07)の3人が残る
+    # （3 > survivors_max=2のため自然には終わらない）
+    decisive_4_3 = {f"P{i:02d}": Vote.YES for i in range(1, 5)}
+    decisive_4_3.update({f"P{i:02d}": Vote.NO for i in range(5, 8)})
+    agents = make_roster({(1, 1): decisive_4_3}, num_players=7)
+    config = GameConfig.dev_small(num_players=7, num_rounds=2).model_copy(
+        update={"max_votes_per_round": 1},
+    )
+    logger = EventLogger()
+    game = Game(config=config, agents=agents, seed=1, logger=logger)
+    result = game.run()  # AssertionErrorにならないことそのものがこのテストの主張
+
+    r1, r2 = result.round_summaries
+    assert r1.aborted is True
+    assert len(r1.votes) == 1
+    v1 = r1.votes[0]
+    # この投票自体の判定結果は書き換えない（型C投票単位条件の判定はこの結果を
+    # すでに使い済みのため。CLAUDE.md落とし穴⑲と同種の「検査を通すのと実際の
+    # データに使う値は別」の確認観点）
+    assert v1.result == "decisive"
+    assert v1.eliminated_ids == ["P01", "P02", "P03", "P04"]
+    assert v1.remaining_ids == ["P05", "P06", "P07"]
+    assert v1.round_over is True  # game.pyが強制的にTrueへ上書きした値
+    assert r1.winner_ids == []  # 打ち切りなので勝ち残りなし
+    assert r1.carryover_out > 0
+
+    abort_events = [
+        e for e in logger.events
+        if e.event_type == "ROUND_ABORTED" and e.round_num == 1
+    ]
+    assert len(abort_events) == 1
+    assert abort_events[0].data["reason"] == "vote_cap"
+    assert abort_events[0].data["max_votes_per_round"] == 1
+
+    assert r2.carryover_in == r1.carryover_out
+
+
+def test_vote_cap_abort_on_final_round_destroys_pot() -> None:
+    """最終ラウンドで投票上限に達して打ち切りになった場合も、既存の
+    「最終ラウンドの打ち切りは山が消滅する」処理がそのまま働く（§4.4）"""
+    decisive_4_3 = {f"P{i:02d}": Vote.YES for i in range(1, 5)}
+    decisive_4_3.update({f"P{i:02d}": Vote.NO for i in range(5, 8)})
+    agents = make_roster({(1, 1): decisive_4_3}, num_players=7)
+    config = GameConfig.dev_small(num_players=7, num_rounds=1).model_copy(
+        update={"max_votes_per_round": 1},
+    )
+    game = Game(config=config, agents=agents, seed=1, logger=EventLogger())
+    result = game.run()
+
+    r1 = result.round_summaries[0]
+    assert r1.aborted is True
+    assert r1.carryover_out == 0
+    assert r1.destroyed_pot == r1.pot_final
+    assert r1.winner_ids == []
+
+
 def test_acceptance_50_choose_loan_cannot_see_others() -> None:
     """#50: 借入額の選択中、全員の決定がそろうまで他のAIの借入額は見えない
 

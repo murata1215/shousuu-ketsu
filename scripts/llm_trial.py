@@ -58,7 +58,7 @@ from llm.constants import DEFAULT_TEMPERATURE  # noqa: E402
 from llm.game_cost_budget import GameCostBudget  # noqa: E402
 from llm.llm_agent import LLMAgent, build_json_object_request_options  # noqa: E402
 from llm.llm_logger import LLMLogger  # noqa: E402
-from llm.models import get_model  # noqa: E402
+from llm.models import NAMED_ROSTERS, get_model  # noqa: E402
 from llm.questions import DEFAULT_HISTORY_PATH, append_question, generate_questions, load_questions_file  # noqa: E402
 from llm.response_parser import extract_json  # noqa: E402
 
@@ -75,7 +75,14 @@ def parse_roster(roster_str: str) -> list[str]:
     gentei-janken `scripts/simulate.py`/`scripts/llm_trial.py` と同じ ":count" 記法。
     モデルキーの妥当性はllm.models.get_model()が呼び出し元で検証するため、
     ここでは展開のみ行う。
+
+    サイクル7.0: roster_str全体が llm.models.NAMED_ROSTERS の登録名（例: "L18_S2"）と
+    完全一致する場合は、その名前が指す登録キー列をそのまま返す（":count"記法や
+    カンマ区切りの直書きとは併用しない。名前1つだけを渡す想定）。
     """
+    named = NAMED_ROSTERS.get(roster_str.strip())
+    if named is not None:
+        return list(named)
     result: list[str] = []
     for part in roster_str.split(","):
         part = part.strip()
