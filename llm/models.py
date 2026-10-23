@@ -738,12 +738,17 @@ MODEL_REGISTRY: dict[str, ModelInfo] = {
         env_key="GROK_API_KEY", base_url="https://api.x.ai/v1",
         cached_input_price=0.50,
         tier="H",
-        # 常時思考・無効化不可（grok-4.5/4.6と同じ系列）。トリビアルな1コール
-        # 実測ではreasoning_tokens=101だが、実際の交渉文面での実測はまだ無い。
-        # H4(grok-4.6)が最終的に辿り着いた値(9728)を暫定で流用し、Step3の
-        # 実測で見直す（provider保証の上限ではない）。
-        hidden_thinking_reserve_tokens=9728,
-        timeout_seconds=180,  # H4と同じ理由（常時思考モデルは60秒の壁に当たりやすい）
+        # xAI公式（docs.x.ai /model-capabilities/text/reasoning、2026-10-23確認）:
+        # grok-4.7/4.6/4.5 は reasoning_effort に対応（low/medium/high=既定/xhigh）。
+        # 思考自体の無効化は不可。サイクル7.0bで low を3回実測し、high（未指定）の
+        # 161.9秒・reasoning 9,375 に対し 14.2〜32.2秒・reasoning 527〜1,523 まで
+        # 下がることを確認した（3回とも finish_reason='stop'・JSON解析成功）。
+        extra_params={"reasoning_effort": "low"},
+        # 実測最大1,523に既存モデル群と同じ経験的安全率1.2を掛け、
+        # ceil(1523*1.2)=1828 を512単位へ切り上げて2048（H4が9728へ上げたときと同じ決め方。
+        # provider保証の上限ではない。観測が3回しかないため下限512より十分大きい値を採る）。
+        hidden_thinking_reserve_tokens=2048,
+        timeout_seconds=180,  # low でも揺れるため据え置き（上限を下げる利得が無い）
     ),
     "S2_XA_M": ModelInfo(
         model_id="grok-4.3",

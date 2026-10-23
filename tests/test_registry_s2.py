@@ -134,6 +134,12 @@ def test_xai_low_seat_is_the_non_reasoning_variant_not_grok_4_1_fast():
     assert info.model_id != "grok-4.1-fast"
 
 
+def test_xai_high_seat_uses_low_reasoning_effort():
+    """grok-4.7は思考を無効化できない（xAI公式）。最小の"low"で固定する（サイクル7.0b実測）"""
+    info = MODEL_REGISTRY["S2_XA_H"]
+    assert info.extra_params["reasoning_effort"] == "low"
+
+
 def test_no_duplicate_model_id_within_s2_roster_itself():
     """指示書の確認事項: S2の18席どうしではmodel_idが重複しないこと
     （旧ロスターH1〜L7との重複は許容。既存L4/H5/M5/L5/H6と同一モデルを
