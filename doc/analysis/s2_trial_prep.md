@@ -37,13 +37,17 @@ uv run python scripts/llm_trial.py --roster L18_S2 --seed 7001 \
     --game-id t18_r1_7001
 ```
 
-**注意**: `S2_OA_H/M/L`（OpenAI、DevRelay/Codex経路）の3席は、`doc/analysis/
-s2_seat_smoke.md`に記録したとおり現時点でDevRelayサーバー側がGPT-6世代のCodexモデル名を
-認識せず失敗する（`aiUnavailable: Unknown Codex model`）。このまま実行すると、
-`llm_trial.py`の事前疎通確認（`--preflight-only`または本走り冒頭のpreflight probe）で
-この3席が失敗として記録される見込み。DevRelay側の対応を待つか、下記フォールバックを使うこと。
+**解消済み（サイクル7.0a）**: `S2_OA_H/M/L`（OpenAI、DevRelay/Codex経路）の3席は、
+`doc/analysis/s2_seat_smoke.md`に記録したとおりStep 3時点ではDevRelayサーバー側が
+GPT-6世代のCodexモデル名を認識せず失敗していた（`aiUnavailable: Unknown Codex model`）。
+けいすけさんがdevrelay側に3件追加（commit f13c693）・`pm2 restart devrelay-server`を
+実施後、サイクル7.0aで`tools/prompt_smoke.py`により3席とも再確認し、いずれも
+`finish_reason='success'`・解析成功を確認した（`s2_seat_smoke.md`注3）。
+上記「本来の構成（L18_S2、全18席）」のコマンドをそのまま使ってよい。
 
 ### フォールバック（OpenAI3席を既存のGPT-5.6世代DevRelay席に差し替え）
+
+**現在は不要（上記のとおりOpenAI3席は疎通OK）。DevRelayが再び不調になった場合の控えとして残す。**
 
 `NAMED_ROSTERS["L18_S2"]`は変更せず、`--roster`に直書きで差し替える案:
 
@@ -66,7 +70,7 @@ Step 3実測（`doc/analysis/s2_seat_smoke.md`、1コールずつの実測費用
 | 項目 | 値 | 根拠 |
 | --- | --- | --- |
 | 実測した1コールの最大費用 | $0.1330（S2_AN_H1、claude-fable-5-1。初回のキャッシュ書き込みを含む） | Step 3実測 |
-| 18席の1コールずつの費用合計 | $0.339（OpenAI3席は$0=subscription想定または失敗） | Step 3実測の単純合計 |
+| 18席の1コールずつの費用合計 | $0.339（OpenAI3席は$0=subscription、サイクル7.0aで実測確認済み） | Step 3実測の単純合計 |
 | 既存12席・R1だけの実績値（`scripts/llm_trial.py`docstringの実例） | per-seat 0.5〜2.0ドル・game 3.0〜6.0ドル | 既存コードのコメント |
 
 **提案**:
@@ -82,7 +86,8 @@ Step 3実測（`doc/analysis/s2_seat_smoke.md`、1コールずつの実測費用
 
 ## 特に注視してほしい2点（試走実行時）
 
-1. **Grok 4.7（S2_XA_H）**: トリビアルな確認で124.9秒（タイムアウト180秒の約70%）。
+1. **Grok 4.7（S2_XA_H）**: トリビアルな確認で1回目124.9秒・サイクル7.0aの2回目は
+   161.9秒（タイムアウト180秒の約90%、reasoning_tokens=9,375で予約9,728の約96%）。
    実際の交渉プロンプトではより時間がかかる可能性がある。
 2. **Kimi K2.7 Code（S2_MO_M）**: 思考を無効化できないモデル。本番のmax_tokens=4000では
    今回の確認では問題なかったが、reasoning_tokensの変動が大きい（1,363〜2,542トークンを
