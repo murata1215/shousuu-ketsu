@@ -201,6 +201,17 @@ html, body { width: __W__px; height: __H__px; background: #0b0d12; }
   letter-spacing: 0.18em;
   color: var(--subtext);
 }
+.match-header {
+  position: absolute;
+  left: 50%;
+  top: 78px;
+  transform: translateX(-50%);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  color: var(--gold);
+  white-space: nowrap;
+}
 .footer {
   position: absolute;
   left: 0;
@@ -275,6 +286,7 @@ _CARD_HTML = """<!DOCTYPE html>
 <body>
 <div class="card">
   <div class="plate"></div>
+  {match_header}
   <div class="watermark">少数決</div>
   <div class="seatno">SEAT / 席</div>
   <div class="safe">
@@ -295,7 +307,7 @@ _CARD_HTML = """<!DOCTYPE html>
 _SAFE_ZONE_SELECTORS = [".face-wrap", ".pid-badge", ".badge", ".name", ".model-id", ".tier"]
 
 
-def build_card_html(seat: SeatInfo, footer: str = FOOTER) -> str:
+def build_card_html(seat: SeatInfo, footer: str = FOOTER, header: str = "") -> str:
     face_uri = _png_data_uri(_EMOTIONS_DIR / f"{seat.vendor}_{seat.emotion_en}.png", max_px=560)
     if not face_uri:
         raise SystemExit(f"[エラー] キャラ絵が見つかりません: {seat.vendor}_{seat.emotion_en}.png")
@@ -304,8 +316,10 @@ def build_card_html(seat: SeatInfo, footer: str = FOOTER) -> str:
         .replace("__SAFE_TOP__", str(SAFE_TOP)).replace("__SAFE_H__", str(SAFE_BOTTOM - SAFE_TOP))
     )
     badge = f"{seat.provider}" + ("（DevRelay実験席）" if seat.is_devrelay else "")
+    match_header_html = f'<div class="match-header">{_esc(header)}</div>' if header else ""
     html = _CARD_HTML.replace("{css}", css)
     for key, val in (
+        ("{match_header}", match_header_html),
         ("{face_uri}", face_uri),
         ("{pid}", _esc(seat.pid)),
         ("{badge}", _esc(badge)),
@@ -319,14 +333,15 @@ def build_card_html(seat: SeatInfo, footer: str = FOOTER) -> str:
     return html
 
 
-def render_card(seat: SeatInfo, renderer: CardRenderer, out_path: Path, footer: str = FOOTER) -> Path:
-    html = build_card_html(seat, footer=footer)
+def render_card(seat: SeatInfo, renderer: CardRenderer, out_path: Path, footer: str = FOOTER, header: str = "") -> Path:
+    html = build_card_html(seat, footer=footer, header=header)
     renderer.render_html(html, CARD_W, CARD_H, out_path, clip=".card")
     from PIL import Image
 
     im = Image.open(out_path)
     assert im.size == (CARD_W, CARD_H), f"サイズ不正: {im.size}"
-    rects = renderer.measure(html, _SAFE_ZONE_SELECTORS)
+    sels = _SAFE_ZONE_SELECTORS + ([".match-header"] if header else [])
+    rects = renderer.measure(html, sels)
     assert_safe_zone(seat.pid, rects)
     return out_path
 
@@ -340,10 +355,10 @@ _SUMMARY_EXTRA_CSS = """
 .grid {
   flex: none;
   width: 660px;
-  height: 230px;
+  height: __GRID_H__px;
   display: grid;
   grid-template-columns: repeat(6, 1fr);
-  grid-template-rows: repeat(2, 1fr);
+  grid-template-rows: repeat(__GRID_ROWS__, 1fr);
   gap: 14px;
 }
 .tile {
@@ -399,6 +414,7 @@ _SUMMARY_HTML = """<!DOCTYPE html>
 <body>
 <div class="card">
   <div class="plate"></div>
+  {match_header}
   <div class="watermark">総括</div>
   <div class="seatno">RESULT / 総括</div>
   <div class="safe summary">
@@ -417,25 +433,52 @@ _SUMMARY_HTML = """<!DOCTYPE html>
 
 _SUMMARY_SAFE_ZONE_SELECTORS = [".grid", ".summary-label", ".summary-title", ".summary-badge", ".summary-stat"]
 
+_GRID_COLS = 6
+_GRID_TILE_H = 108
+_GRID_GAP = 14
+
+
+def _grid_rows_and_height(n: int) -> tuple[int, int]:
+    """タイル数nから、グリッドの行数と高さ(px)を求める（6列固定、1行108px、間隔14px）。
+
+    12枚（2行）のとき height=230px になり、既存の総括カードの値と一致する
+    （`rows*108 + (rows-1)*14`。n=12→230、n=17→352）。
+    """
+    rows = -(-n // _GRID_COLS)  # ceil(n / 6)
+    height = rows * _GRID_TILE_H + (rows - 1) * _GRID_GAP
+    return rows, height
+
 
 def build_summary_card_html(
     seats_by_rank: list[SeatInfo], *, label: str, title: str, badge: str, stat: str, footer: str = FOOTER,
+    header: str = "", tile_tag_fn: Any = None,
 ) -> str:
-    """seats_by_rank（1位→最下位の順）の顔を2行×6列グリッドに並べる。"""
+    """seats_by_rank（1位→最下位の順）の顔を6列グリッドに並べる（行数は枚数から自動計算）。
+
+    `tile_tag_fn`（既定: 席番号）で各タイル下部の札の文言を決められる
+    （第2戦は「他席は席番号を使わない」方針のため最終順位の表示に切り替える）。
+    """
+    if tile_tag_fn is None:
+        tile_tag_fn = lambda seat: seat.pid  # noqa: E731
+
+    rows, grid_h = _grid_rows_and_height(len(seats_by_rank))
     css = (
         _CARD_CSS.replace("__W__", str(CARD_W)).replace("__H__", str(CARD_H))
         .replace("__SAFE_TOP__", str(SAFE_TOP)).replace("__SAFE_H__", str(SAFE_BOTTOM - SAFE_TOP))
-    ) + _SUMMARY_EXTRA_CSS
+    ) + _SUMMARY_EXTRA_CSS.replace("__GRID_ROWS__", str(rows)).replace("__GRID_H__", str(grid_h))
 
     tiles_html: list[str] = []
     for seat in seats_by_rank:
         face_uri = _png_data_uri(_EMOTIONS_DIR / f"{seat.vendor}_{seat.emotion_en}.png", max_px=220)
         if not face_uri:
             raise SystemExit(f"[エラー] キャラ絵が見つかりません: {seat.vendor}_{seat.emotion_en}.png")
-        tiles_html.append(f'<div class="tile"><img src="{face_uri}"><div class="tag">{_esc(seat.pid)}</div></div>')
+        tag = _esc(str(tile_tag_fn(seat)))
+        tiles_html.append(f'<div class="tile"><img src="{face_uri}"><div class="tag">{tag}</div></div>')
 
+    match_header_html = f'<div class="match-header">{_esc(header)}</div>' if header else ""
     html = _SUMMARY_HTML.replace("{css}", css)
     for key, val in (
+        ("{match_header}", match_header_html),
         ("{tiles}", "".join(tiles_html)),
         ("{label}", _esc(label)),
         ("{title}", _esc(title)),
@@ -450,13 +493,18 @@ def build_summary_card_html(
 def render_summary_card(
     seats_by_rank: list[SeatInfo], renderer: CardRenderer, out_path: Path,
     *, label: str, title: str, badge: str, stat: str, footer: str = FOOTER,
+    header: str = "", tile_tag_fn: Any = None,
 ) -> Path:
-    html = build_summary_card_html(seats_by_rank, label=label, title=title, badge=badge, stat=stat, footer=footer)
+    html = build_summary_card_html(
+        seats_by_rank, label=label, title=title, badge=badge, stat=stat, footer=footer,
+        header=header, tile_tag_fn=tile_tag_fn,
+    )
     renderer.render_html(html, CARD_W, CARD_H, out_path, clip=".card")
     from PIL import Image
 
     im = Image.open(out_path)
     assert im.size == (CARD_W, CARD_H), f"サイズ不正: {im.size}"
-    rects = renderer.measure(html, _SUMMARY_SAFE_ZONE_SELECTORS)
+    sels = _SUMMARY_SAFE_ZONE_SELECTORS + ([".match-header"] if header else [])
+    rects = renderer.measure(html, sels)
     assert_safe_zone("summary", rects)
     return out_path

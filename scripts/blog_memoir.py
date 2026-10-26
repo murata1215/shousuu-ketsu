@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-本人執筆手記の生成CLI（サイクル6.0新設、1コマンド1席）
+本人執筆手記の生成CLI（サイクル6.0新設、1コマンド1席。サイクル7.3で`--date`対応）
 
 CLAUDE.md過去の落とし穴⑤・⑮: 長い処理・実際のAI呼び出しはバックグラウンド化・一括化せず、
 1席ずつフォアグラウンドで回し、完了を確認してから次に進む。このスクリプトは**常に1席だけ**
-処理する（12席をまとめて回すオプションは意図的に持たない）。
+処理する（全席をまとめて回すオプションは意図的に持たない）。
 
 使い方:
-    uv run python scripts/blog_memoir.py --pid P06 --dump-prompt out.md   # 素材だけ書き出す（API呼ばず）
-    uv run python scripts/blog_memoir.py --pid P06 --dry-run              # ダミー記事（API呼ばず）
-    uv run python scripts/blog_memoir.py --pid P06                       # 実際にAIへ投げて1回生成
-    uv run python scripts/blog_memoir.py --pid P06 --attempt 2           # 2回目の試行（1回目が失敗した場合）
+    uv run python scripts/blog_memoir.py --date 20261023 --pid P01 --dump-prompt out.md
+    uv run python scripts/blog_memoir.py --date 20261023 --pid P01 --dry-run
+    uv run python scripts/blog_memoir.py --date 20261023 --pid P01
+    uv run python scripts/blog_memoir.py --date 20261023 --pid P01 --attempt 2
+
+`--date`省略時は`blog.match_config.DEFAULT_DATE`（現行サイクルの試合）を使う。
 """
 
 from __future__ import annotations
@@ -29,15 +31,11 @@ load_dotenv()
 
 import re  # noqa: E402
 
+from blog.match_config import DEFAULT_DATE, LOG_DIR, MATCHES  # noqa: E402
 from blog.seats import _registry_info_for, load_seat_map  # noqa: E402
 from blog.self_memoir import MAX_TOTAL_CHARS_DEFAULT, SelfMemoirMaterial, build_self_memoir_material  # noqa: E402
 from llm.adapters import create_adapter  # noqa: E402
 from llm.costing import usage_cost  # noqa: E402
-
-GAME_ID = "t12_r4_4501c"
-LOG_DIR = PROJECT_ROOT / "logs" / "llm_v0_4"
-OUT_DIR = PROJECT_ROOT / "doc" / "blog" / "20261013"
-RAW_DIR = OUT_DIR / "raw"
 
 # ブログ生成時のみ全席300秒下限へ延長する（本戦のMODEL_REGISTRYは無変更。
 # DevRelay席は契約上180秒でクランプ。dangou-card scripts/blog.py::_prep_blog_model と同じ方針）
@@ -74,9 +72,9 @@ def _strip_code_fence(text: str) -> str:
 
 
 def generate_memoir_article(
-    pid: str, material: SelfMemoirMaterial, dry_run: bool = False, attempt: int = 1,
+    match, pid: str, material: SelfMemoirMaterial, dry_run: bool = False, attempt: int = 1,
 ) -> tuple[str, dict]:
-    seat_map = load_seat_map(LOG_DIR, GAME_ID)
+    seat_map = load_seat_map(LOG_DIR, match.game_id)
     model_info = _registry_info_for(seat_map[pid])
 
     if dry_run:
@@ -122,6 +120,7 @@ def generate_memoir_article(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--date", default=DEFAULT_DATE, choices=sorted(MATCHES), help="対象試合の日付（既定: 現行サイクルの試合）")
     ap.add_argument("--pid", required=True, help="席ID（例: P06）")
     ap.add_argument("--dry-run", action="store_true", help="APIを呼ばずダミー記事を保存する")
     ap.add_argument("--dump-prompt", default=None, help="APIを呼ばず素材全文をこのパスへ書き出して終了する")
@@ -129,7 +128,14 @@ def main() -> None:
     ap.add_argument("--max-input-chars", type=int, default=MAX_TOTAL_CHARS_DEFAULT)
     args = ap.parse_args()
 
-    material = build_self_memoir_material(LOG_DIR, GAME_ID, args.pid, max_total_chars=args.max_input_chars)
+    match = MATCHES[args.date]
+    if args.pid not in match.seat_order:
+        raise SystemExit(f"[エラー] {match.date}（{match.game_id}）に席 {args.pid} は無い。有効な席: {sorted(match.seat_order)}")
+
+    material = build_self_memoir_material(
+        LOG_DIR, match.game_id, args.pid, max_total_chars=args.max_input_chars,
+        name_by_model_only=(match.match_no != 1),
+    )
 
     if args.dump_prompt:
         out_path = Path(args.dump_prompt)
@@ -151,13 +157,13 @@ def main() -> None:
         print(f"プロンプトダンプ: {out_path}  (合計{s['total_chars']}字)")
         return
 
-    md, meta = generate_memoir_article(args.pid, material, dry_run=args.dry_run, attempt=args.attempt)
+    md, meta = generate_memoir_article(match, args.pid, material, dry_run=args.dry_run, attempt=args.attempt)
 
-    RAW_DIR.mkdir(parents=True, exist_ok=True)
-    raw_path = RAW_DIR / f"{args.pid}_attempt{args.attempt}.md"
+    match.raw_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = match.raw_dir / f"{args.pid}_attempt{args.attempt}.md"
     raw_path.write_text(md, encoding="utf-8")
 
-    print(f"=== self-memoir: {args.pid}（{meta.get('model_name')}） attempt{args.attempt} ===")
+    print(f"=== self-memoir: {match.date} {args.pid}（{meta.get('model_name')}） attempt{args.attempt} ===")
     print(f"コスト: ${meta.get('cost_usd', 0):.4f}  入力トークン: {meta.get('input_tokens')}  出力トークン: {meta.get('output_tokens')}")
     print(f"入力: 合計{material.stats['total_chars']}字")
     print(f"出力: {len(md)}字  finish_reason={meta.get('finish_reason')}")

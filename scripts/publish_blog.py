@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
 連載記事の公開の段取り（サイクル6.0新設、`~/dangou-card/scripts/publish_next.py`の
-設計を少数決の1試合連載に合わせて作り直したもの）
+設計を少数決の1試合連載に合わせて作り直したもの。サイクル7.3で`--date`対応）
 
 使い方:
-    uv run python scripts/publish_blog.py --preflight          # 公開前の読み合わせ用プレビューを出力（ネット不使用）
-    uv run python scripts/publish_blog.py --dry-run             # 実公開せず流れを確認（GETのみ）
-    uv run python scripts/publish_blog.py --dry-run --order 01  # orderを明示指定して確認
-    uv run python scripts/publish_blog.py --check-lengths       # 13本のtweet_text/x_hook加重文字数を検算
-    uv run python scripts/publish_blog.py --order 01            # 実公開（本番、1本だけ）
-    uv run python scripts/publish_blog.py --replay 01           # 公開済みorderの投稿セットを再表示のみ
+    uv run python scripts/publish_blog.py --date 20261023 --preflight
+    uv run python scripts/publish_blog.py --date 20261023 --dry-run
+    uv run python scripts/publish_blog.py --date 20261023 --dry-run --order 01
+    uv run python scripts/publish_blog.py --date 20261023 --check-lengths
+    uv run python scripts/publish_blog.py --date 20261023 --order 01            # 実公開（本番、1本だけ）
+    uv run python scripts/publish_blog.py --date 20261023 --replay 01          # 公開済みorderの投稿セットを再表示のみ
+
+`--date`はこのスクリプトでは**必須**にしていない（既定値は`blog.match_config.DEFAULT_DATE`）が、
+実公開・`plan.md`/`INDEX.md`の書き換えを伴うため、実行時に必ず対象の試合を目で確認すること。
 
 挙動概要:
-  1. `doc/blog/20261013/plan.md`の「## 投稿状態」節を走査し、状態が「原稿済（未投稿）」の
+  1. `doc/blog/{date}/plan.md`の「## 投稿状態」節を走査し、状態が「原稿済（未投稿）」の
      最小orderを1本選ぶ（--orderで明示指定も可）。
   2. frontmatterのtitle/slug/category/tagsで記事を公開する。featured（キャラカード）は
      本文画像とは別枠でアップロードしてfeatured_media_urlに使う。本文には画像を含めない
@@ -21,7 +24,7 @@
      `lead`をそのままexcerptに設定する。公開前にexcerptへのハッシュタグ/URL混入と、
      tweet_text(+URL)の加重文字数280超過を検証する。
   4. 公開後、plan.mdの該当行とdoc/blog/INDEX.mdを更新し、投稿セットを
-     doc/blog/20261013/post_sets.mdへ追記する。
+     doc/blog/{date}/post_sets.mdへ追記する。
   5. 二重公開ガード: plan.mdが「公開済」のorderは対象にしない。実公開直前にGET /posts で
      同一タイトルの既存記事が無いか確認する。
 
@@ -45,20 +48,32 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+from blog.match_config import BLOG_ROOT, DEFAULT_DATE, MATCHES  # noqa: E402
 from blog.pixblog_client import PixBlogClient, PixBlogError  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# 定数
+# 定数（試合ごとに`configure(date)`で差し替える。名前は変えない—
+# tests/test_publish_blog.pyがPLAN_PATH/INDEX_PATHを直接monkeypatchしているため）
 # ---------------------------------------------------------------------------
 
-DATE = "20261013"
-BLOG_ROOT = PROJECT_ROOT / "doc" / "blog"
-DATE_DIR = BLOG_ROOT / DATE
-POSTS_DIR = DATE_DIR / "posts"
-PLAN_PATH = DATE_DIR / "plan.md"
 INDEX_PATH = BLOG_ROOT / "INDEX.md"
-POST_SETS_PATH = DATE_DIR / "post_sets.md"
-PREFLIGHT_OUT_PATH = PROJECT_ROOT / ".devrelay-output" / "blog_20261013_preflight.md"
+
+
+def configure(date: str) -> None:
+    """対象試合を切り替える（`main()`から一度だけ呼ぶ想定）。importされた時点では
+    `DEFAULT_DATE`で初期化済みのため、第1戦相当の既定動作のままテストが通る。
+    """
+    global MATCH, DATE, DATE_DIR, POSTS_DIR, PLAN_PATH, POST_SETS_PATH, PREFLIGHT_OUT_PATH
+    MATCH = MATCHES[date]
+    DATE = MATCH.date
+    DATE_DIR = MATCH.out_dir
+    POSTS_DIR = MATCH.posts_dir
+    PLAN_PATH = MATCH.plan_path
+    POST_SETS_PATH = MATCH.post_sets_path
+    PREFLIGHT_OUT_PATH = MATCH.preflight_path
+
+
+configure(DEFAULT_DATE)
 
 STATUS_DRAFT_DONE = "原稿済（未投稿）"
 STATUS_PUBLISHED_PREFIX = "公開済"
@@ -226,7 +241,7 @@ def update_index_status(published_count: int, total_count: int) -> None:
     lines = text.splitlines()
     out = []
     for line in lines:
-        if "| 2026-10-13 |" in line:
+        if f"| {MATCH.index_date} |" in line:
             cells = [c.strip() for c in line.strip("|").split("|")]
             if len(cells) == 3:
                 cells[2] = f"公開中（{published_count}/{total_count}）" if published_count < total_count else "公開完了"
@@ -274,7 +289,7 @@ def build_post_set(order: str, x_hook: str, title: str, url: str, fm: dict) -> s
 
 
 def append_post_set(post_set: str) -> None:
-    header = "# post_sets.md（サイクル6.0・13本の投稿セット記録）\n"
+    header = f"# post_sets.md（{MATCH.date}・{MATCH.post_count}本の投稿セット記録）\n"
     if not POST_SETS_PATH.exists():
         POST_SETS_PATH.write_text(header, encoding="utf-8")
     with open(POST_SETS_PATH, "a", encoding="utf-8") as f:
@@ -380,9 +395,10 @@ def cmd_check_lengths() -> None:
         hw_col = f"{hw:>6}" if hw is not None else f"{'—':>6}"
         print(f"{order:>5} | {name:<24} | {w:>7} | {tw_w:>10} | {d:>5} | {verdict:<4} | {hw_col} | {hook_verdict:<6} | {excerpt_col}")
     print("-" * 110)
-    print(f"[報告] tweet_text+URL超過: {len(overflow)}件" if overflow else "全13本、tweet_text+URLで280文字以内。")
-    print(f"[報告] excerptにハッシュタグ/URL混入: {len(excerpt_ng)}件" if excerpt_ng else "全13本、excerptにハッシュタグ・URLの混入なし。")
-    print(f"[報告] x_hook超過: {len(hook_overflow)}件" if hook_overflow else "全13本、x_hookで280文字以内。")
+    n = len(entries)
+    print(f"[報告] tweet_text+URL超過: {len(overflow)}件" if overflow else f"全{n}本、tweet_text+URLで280文字以内。")
+    print(f"[報告] excerptにハッシュタグ/URL混入: {len(excerpt_ng)}件" if excerpt_ng else f"全{n}本、excerptにハッシュタグ・URLの混入なし。")
+    print(f"[報告] x_hook超過: {len(hook_overflow)}件" if hook_overflow else f"全{n}本、x_hookで280文字以内。")
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +408,7 @@ def cmd_check_lengths() -> None:
 def cmd_preflight() -> None:
     entries = discover_all_posts()
     lines = [
-        "# 公開前プレビュー（サイクル6.0・13本、ネット未使用・全文読み合わせ用）",
+        f"# 公開前プレビュー（{MATCH.date}・{len(entries)}本、ネット未使用・全文読み合わせ用）",
         "",
         f"生成日時: {datetime.now(timezone.utc).astimezone().isoformat()}",
         f"対象本数: {len(entries)}",
@@ -558,6 +574,7 @@ def cmd_replay(order: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--date", default=DEFAULT_DATE, choices=sorted(MATCHES), help="対象試合の日付（既定: 現行サイクルの試合）")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--order", type=str, default=None)
     parser.add_argument("--check-lengths", action="store_true")
@@ -565,6 +582,9 @@ def main() -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--replay", type=str, default=None)
     args = parser.parse_args()
+
+    configure(args.date)
+    print(f"[対象試合] {MATCH.date}（{MATCH.game_id}）match_no={MATCH.match_no}")
 
     if args.check_lengths:
         cmd_check_lengths()

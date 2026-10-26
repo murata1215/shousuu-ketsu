@@ -1,5 +1,6 @@
 """
-公開の段取り（`scripts/publish_blog.py`）のテスト（サイクル6.0新設）
+公開の段取り（`scripts/publish_blog.py`）のテスト（サイクル6.0新設、サイクル7.3で
+複数試合に対応）
 
 PixBlogへのネットワークアクセスを要する経路（実公開・`--dry-run`の既存記事チェック）は
 対象外にし、純粋関数（X加重文字数・frontmatterのパース・plan.mdの「## 投稿状態」節の
@@ -22,6 +23,14 @@ spec = importlib.util.spec_from_file_location("publish_blog", SCRIPT_PATH)
 publish_blog = importlib.util.module_from_spec(spec)
 sys.path.insert(0, str(PROJECT_ROOT))
 spec.loader.exec_module(publish_blog)
+
+from blog.match_config import MATCHES  # noqa: E402
+
+M1 = MATCHES["20261013"]  # 公開済み。postsディレクトリが常に存在する
+
+
+def _configure(date: str) -> None:
+    publish_blog.configure(date)
 
 
 # ---------------------------------------------------------------------------
@@ -86,22 +95,33 @@ def test_find_images_empty_for_no_inline_images() -> None:
     assert publish_blog.find_images("本文中に画像参照は無い。") == []
 
 
-def test_discover_all_posts_finds_13_posts_in_order() -> None:
-    entries = publish_blog.discover_all_posts()
-    assert len(entries) == 13
-    orders = [int(e["fm"]["order"]) for e in entries]
-    assert orders == list(range(1, 14))
-    for e in entries:
-        assert publish_blog.find_images(e["body"]) == [], f"{e['path'].name}: 本文に画像参照がある"
+def test_discover_all_posts_finds_all_posts_in_order() -> None:
+    """公開済みの第1戦（13本）で確認する。第2戦は生成後に別途確認する。"""
+    orig = publish_blog.MATCH.date
+    _configure(M1.date)
+    try:
+        entries = publish_blog.discover_all_posts()
+        assert len(entries) == M1.post_count
+        orders = [int(e["fm"]["order"]) for e in entries]
+        assert orders == list(range(1, M1.post_count + 1))
+        for e in entries:
+            assert publish_blog.find_images(e["body"]) == [], f"{e['path'].name}: 本文に画像参照がある"
+    finally:
+        _configure(orig)
 
 
 def test_featured_relpath_str_is_relative_not_absolute() -> None:
     """投稿セットの画像の場所は相対パスで書く（ホームのパスを含まない）。"""
-    fm = {"featured": "images/cards/13_P06_card.png"}
-    rel = publish_blog.featured_relpath_str(fm)
-    assert rel == "doc/blog/20261013/images/cards/13_P06_card.png"
-    assert not rel.startswith("/")
-    assert str(Path.home()) not in rel
+    orig = publish_blog.MATCH.date
+    _configure(M1.date)
+    try:
+        fm = {"featured": "images/cards/13_P06_card.png"}
+        rel = publish_blog.featured_relpath_str(fm)
+        assert rel == "doc/blog/20261013/images/cards/13_P06_card.png"
+        assert not rel.startswith("/")
+        assert str(Path.home()) not in rel
+    finally:
+        _configure(orig)
 
 
 # ---------------------------------------------------------------------------
@@ -162,19 +182,25 @@ def test_update_plan_status_only_touches_target_section(tmp_path) -> None:
 
 
 def test_update_index_status_updates_only_date_row(tmp_path) -> None:
-    index_path = tmp_path / "INDEX.md"
-    index_path.write_text(
-        "# 索引\n\n| 試合日 | 試合ID | 状態 |\n|---|---|---|\n| 2026-10-13 | t12_r4_4501c | 公開中（0/13） |\n",
-        encoding="utf-8",
-    )
-    orig = publish_blog.INDEX_PATH
-    publish_blog.INDEX_PATH = index_path
+    orig_date = publish_blog.MATCH.date
+    _configure(M1.date)
     try:
-        publish_blog.update_index_status(5, 13)
-        text = index_path.read_text(encoding="utf-8")
+        index_path = tmp_path / "INDEX.md"
+        index_path.write_text(
+            "# 索引\n\n| 試合日 | 試合ID | 状態 |\n|---|---|---|\n"
+            f"| {M1.index_date} | {M1.game_id} | 公開中（0/13） |\n",
+            encoding="utf-8",
+        )
+        orig_index = publish_blog.INDEX_PATH
+        publish_blog.INDEX_PATH = index_path
+        try:
+            publish_blog.update_index_status(5, 13)
+            text = index_path.read_text(encoding="utf-8")
+        finally:
+            publish_blog.INDEX_PATH = orig_index
+        assert "公開中（5/13）" in text
     finally:
-        publish_blog.INDEX_PATH = orig
-    assert "公開中（5/13）" in text
+        _configure(orig_date)
 
 
 # ---------------------------------------------------------------------------
@@ -182,13 +208,18 @@ def test_update_index_status_updates_only_date_row(tmp_path) -> None:
 # ---------------------------------------------------------------------------
 
 def test_build_post_set_contains_hook_title_url_and_relative_image() -> None:
-    fm = {"featured": "images/cards/01_summary_card.png"}
-    post_set = publish_blog.build_post_set("01", "フック文 #嘘八百万", "タイトル", "https://example.com/post", fm)
-    assert "フック文 #嘘八百万" in post_set
-    assert "タイトル" in post_set
-    assert "https://example.com/post" in post_set
-    assert "doc/blog/20261013/images/cards/01_summary_card.png" in post_set
-    assert str(Path.home()) not in post_set
+    orig = publish_blog.MATCH.date
+    _configure(M1.date)
+    try:
+        fm = {"featured": "images/cards/01_summary_card.png"}
+        post_set = publish_blog.build_post_set("01", "フック文 #嘘八百万", "タイトル", "https://example.com/post", fm)
+        assert "フック文 #嘘八百万" in post_set
+        assert "タイトル" in post_set
+        assert "https://example.com/post" in post_set
+        assert "doc/blog/20261013/images/cards/01_summary_card.png" in post_set
+        assert str(Path.home()) not in post_set
+    finally:
+        _configure(orig)
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +228,7 @@ def test_build_post_set_contains_hook_title_url_and_relative_image() -> None:
 
 def test_cli_check_lengths_runs_without_network(tmp_path) -> None:
     res = subprocess.run(
-        [sys.executable, str(SCRIPT_PATH), "--check-lengths"],
+        [sys.executable, str(SCRIPT_PATH), "--date", M1.date, "--check-lengths"],
         cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
     )
     assert res.returncode == 0
@@ -206,11 +237,11 @@ def test_cli_check_lengths_runs_without_network(tmp_path) -> None:
 
 def test_cli_preflight_runs_without_network_and_writes_output() -> None:
     res = subprocess.run(
-        [sys.executable, str(SCRIPT_PATH), "--preflight"],
+        [sys.executable, str(SCRIPT_PATH), "--date", M1.date, "--preflight"],
         cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=60,
     )
     assert res.returncode == 0
-    assert publish_blog.PREFLIGHT_OUT_PATH.exists()
-    text = publish_blog.PREFLIGHT_OUT_PATH.read_text(encoding="utf-8")
+    assert M1.preflight_path.exists()
+    text = M1.preflight_path.read_text(encoding="utf-8")
     assert "order 01" in text
-    assert "order 13" in text
+    assert f"order {M1.post_count:02d}" in text

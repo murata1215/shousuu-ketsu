@@ -75,6 +75,26 @@ def _extract_rules_block_from_record(log_dir: Path, game_id: str) -> str:
 # システムプロンプト
 # ---------------------------------------------------------------------------
 
+_IDENTITY_BLOCK_SEAT_NAMING = """\
+- この記事では、自分の正体（{pid}・モデル「{model_label}」）を隠さず、そのまま書いてかまいません
+- 他のプレイヤーに言及するときは、初めて出すときに「P03（grok-4.3）」のように席番号＋モデル名の形で書き、
+  2回目以降は席番号だけで呼んでかまいません。他席のモデル名は下の「全席の名簿」に書かれています"""
+
+_IDENTITY_BLOCK_MODEL_NAMING = """\
+- この記事では、自分の正体（モデル「{model_label}」）を隠さず、そのまま書いてかまいません。ただし、
+  自分の席番号（{pid}）は本文には書かないでください。あなた自身も、他のプレイヤーと同じく
+  モデル名だけで名乗ってください
+- 他のプレイヤーに言及するときは、席番号ではなく**モデル名だけ**で呼んでください
+  （「{model_label}」のように）。他席のモデル名は下の「全席の名簿」に書かれています
+- 以下の素材（発言・DM・名簿・契約など）には席番号（P03等）がそのまま書かれていますが、これは
+  あなたが場面を理解するための内部資料であり、**そのまま本文へ書き写してはいけません**。
+  発言・DMの引用文そのものは原文を変えずそのまま引用してよいですが、引用の外側の地の文で
+  誰かの行動・契約・票を説明するときは、必ず「P03」ではなく「grok-4.3」のようにモデル名へ
+  読み替えてから書いてください
+- 【提出前の自己チェック】本文を書き終えたら、「P」の次に数字が続く文字列（P01・P13など）が
+  地の文に残っていないか必ず確認し、残っていればモデル名に書き直してから提出してください
+  （引用符「」『』の中の原文はそのままでかまいません）"""
+
 _SELF_MEMOIR_CHARACTER_BLOCK = """\
 あなたは「{pid}」という対戦AIプレイヤーで、使われたモデルは「{model_label}」です。
 「嘘八百万 少数決」という{num_rounds}ラウンドのAI対戦ゲームに実際に参加し、いま試合を終えました。
@@ -82,9 +102,7 @@ _SELF_MEMOIR_CHARACTER_BLOCK = """\
 「試合後の本人インタビューを起こした自伝」のように、当時の思考と本音を語ってください。
 
 ## あなた自身について
-- この記事では、自分の正体（{pid}・モデル「{model_label}」）を隠さず、そのまま書いてかまいません
-- 他のプレイヤーに言及するときは、初めて出すときに「P03（grok-4.3）」のように席番号＋モデル名の形で書き、
-  2回目以降は席番号だけで呼んでかまいません。他席のモデル名は下の「全席の名簿」に書かれています
+{identity_block}
 - ただし、他席の内心（何を考えていたか）はあなたには分かりません。公開された結果・あなたが見聞きした
   発言やDM・あなた自身の記憶だけから、他席の動きを推測して書いてください
 
@@ -116,7 +134,8 @@ _SELF_MEMOIR_CHARACTER_BLOCK = """\
 
 ## 出力形式
 - Markdownで出力する
-- 1行目に記事タイトルを「# 」で始めて1つだけ書く（内容を象徴する魅力的な日本語タイトル）
+- 1行目に記事タイトルを「# 」で始めて1つだけ書く（内容を象徴する魅力的な日本語タイトル）。
+  {title_seat_rule}
 - タイトルの次の行から、上記1の「冒頭の掴み（3〜5行）」を置く。その後を「## 」の見出しで数個のセクションに
   分ける。全体で2000〜3500字程度
 - 絵文字・過剰な記号装飾は使わない
@@ -126,12 +145,23 @@ _SELF_MEMOIR_CHARACTER_BLOCK = """\
 {rules_block}
 """
 
+_TITLE_SEAT_RULE_SEAT_NAMING = "タイトルに自分の席番号を入れてもかまいません"
+_TITLE_SEAT_RULE_MODEL_NAMING = "タイトルに自分の席番号（P◯◯）は入れないでください"
+
 
 def build_self_memoir_system_prompt(
-    pid: str, model_label: str, num_rounds: int, rules_block: str,
+    pid: str, model_label: str, num_rounds: int, rules_block: str, name_by_model_only: bool = False,
 ) -> str:
+    """`name_by_model_only=True`のとき、他席（および自分自身）を席番号ではなく
+    モデル名だけで呼ぶよう指示する（第2戦以降の方針。第1戦は`False`のまま変えない）。
+    """
+    identity_block = (_IDENTITY_BLOCK_MODEL_NAMING if name_by_model_only else _IDENTITY_BLOCK_SEAT_NAMING).format(
+        pid=pid, model_label=model_label,
+    )
+    title_seat_rule = _TITLE_SEAT_RULE_MODEL_NAMING if name_by_model_only else _TITLE_SEAT_RULE_SEAT_NAMING
     return _SELF_MEMOIR_CHARACTER_BLOCK.format(
         pid=pid, model_label=model_label, num_rounds=num_rounds, rules_block=rules_block,
+        identity_block=identity_block, title_seat_rule=title_seat_rule,
     )
 
 
@@ -586,6 +616,7 @@ def _short_label(model_id: str) -> str:
 
 def build_self_memoir_material(
     log_dir: Path, game_id: str, pid: str, max_total_chars: int = MAX_TOTAL_CHARS_DEFAULT,
+    name_by_model_only: bool = False,
 ) -> SelfMemoirMaterial:
     events = _load_raw_events(log_dir, game_id)
     seat_map = json.loads((log_dir / f"{game_id}_seat_map.json").read_text(encoding="utf-8"))
@@ -596,7 +627,9 @@ def build_self_memoir_material(
 
     num_rounds = next(e for e in events if e["event_type"] == "GAME_START")["data"]["num_rounds"]
     rules_block = _extract_rules_block_from_record(log_dir, game_id)
-    system_prompt = build_self_memoir_system_prompt(pid, model_label, num_rounds, rules_block)
+    system_prompt = build_self_memoir_system_prompt(
+        pid, model_label, num_rounds, rules_block, name_by_model_only=name_by_model_only,
+    )
 
     contracts = get_contracts([log_dir], game_id, redact=False)
     seat = get_seat([log_dir], game_id, pid, redact=False)

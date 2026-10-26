@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from blog.cards import _EMOTIONS_DIR, build_card_html, build_summary_card_html
+from blog.cards import _EMOTIONS_DIR, _grid_rows_and_height, build_card_html, build_summary_card_html
+from blog.match_config import MATCHES
 from blog.seats import EMOTION_EN, SeatInfo, _assign_emotions, build_seat_table
 
 FX_DIR = Path(__file__).resolve().parent / "fixtures" / "viewer_logs"
@@ -112,6 +113,35 @@ def test_summary_card_html_includes_all_seats_in_rank_order() -> None:
     assert positions == sorted(positions)
 
 
+def test_summary_card_grid_dimensions_for_various_seat_counts() -> None:
+    """12席（第1戦と同じ既存値）・17席（第2戦）でグリッドの行数・高さが期待どおり。"""
+    assert _grid_rows_and_height(12) == (2, 230)
+    assert _grid_rows_and_height(17) == (3, 352)
+    assert _grid_rows_and_height(18) == (3, 352)
+
+
+def test_twelve_seat_summary_css_unchanged() -> None:
+    """既存の12席（第1戦）の総括カードCSSが変わっていないことを固定する
+    （Chromium不要。header="" のとき`.match-header`のdivが出ないことも確認）。
+    """
+    seats = [_seat(f"P{i:02d}", "openai", final_rank=i) for i in range(1, 13)]
+    html = build_summary_card_html(seats, label="L", title="T", badge="B", stat="S")
+    assert "height: 230px;" in html
+    assert "repeat(2, 1fr)" in html
+    assert '<div class="match-header">' not in html
+
+
+def test_summary_card_header_and_tile_tag_fn_applied() -> None:
+    seats = [_seat(f"P{i:02d}", "openai", final_rank=i) for i in range(1, 5)]
+    html = build_summary_card_html(
+        seats, label="L", title="T", badge="B", stat="S",
+        header="嘘八百万 —少数決— 第2戦", tile_tag_fn=lambda s: f"{s.final_rank}位",
+    )
+    assert '<div class="match-header">嘘八百万 —少数決— 第2戦</div>' in html
+    assert ">1位<" in html
+    assert ">P01<" not in html  # 第2戦は席番号の代わりに順位を表示
+
+
 def test_all_vendor_emotion_images_exist_on_disk() -> None:
     """全ベンダー×全表情の組み合わせが`viewer/static/emotions/`に揃っていること。"""
     vendors = ["anthropic", "openai", "google", "xai", "moonshot", "deepseek"]
@@ -123,7 +153,7 @@ def test_all_vendor_emotion_images_exist_on_disk() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 本番試合（12席）: 実際のレンダリング（Chromium起動）確認
+# 本番試合: 実際のレンダリング（Chromium起動）確認（第1戦・第2戦の両方）
 # ---------------------------------------------------------------------------
 
 pytestmark_real = pytest.mark.skipif(
@@ -131,11 +161,19 @@ pytestmark_real = pytest.mark.skipif(
     reason="本番試合t12_r4_4501cの記録がこの環境に無い（logs/はコミット対象外）",
 )
 
+_ALL_MATCHES = list(MATCHES.values())
 
-@pytestmark_real
-def test_real_game_seat_table_no_emotion_collision_within_vendor() -> None:
-    seats = build_seat_table(REAL_LOGS_DIR, REAL_GAME)
-    assert len(seats) == 12
+
+def _match_available(m) -> bool:
+    return (REAL_LOGS_DIR / f"{m.game_id}_events.jsonl").exists()
+
+
+@pytest.mark.parametrize("match", _ALL_MATCHES, ids=lambda m: m.date)
+def test_real_game_seat_table_no_emotion_collision_within_vendor(match) -> None:
+    if not _match_available(match):
+        pytest.skip(f"{match.game_id}の記録がこの環境に無い（logs/はコミット対象外）")
+    seats = build_seat_table(REAL_LOGS_DIR, match.game_id)
+    assert len(seats) == match.seat_count
     by_vendor: dict[str, list[str]] = {}
     for s in seats:
         by_vendor.setdefault(s.vendor, []).append(s.emotion_en)
@@ -143,16 +181,20 @@ def test_real_game_seat_table_no_emotion_collision_within_vendor() -> None:
         assert len(emos) == len(set(emos)), f"{vendor}: 表情の重複 {emos}"
 
 
-@pytestmark_real
-def test_real_game_render_card_and_summary(tmp_path) -> None:
+@pytest.mark.parametrize("match", _ALL_MATCHES, ids=lambda m: m.date)
+def test_real_game_render_card_and_summary(match, tmp_path) -> None:
+    if not _match_available(match):
+        pytest.skip(f"{match.game_id}の記録がこの環境に無い（logs/はコミット対象外）")
     from blog.cards import CardRenderer, render_card, render_summary_card
 
-    seats = build_seat_table(REAL_LOGS_DIR, REAL_GAME)
+    seats = build_seat_table(REAL_LOGS_DIR, match.game_id)
+    tile_tag_fn = (lambda s: s.pid) if match.match_no == 1 else (lambda s: f"{s.final_rank}位")
     with CardRenderer(scale=1) as renderer:
-        out = render_card(seats[0], renderer, tmp_path / "01_card.png")
+        out = render_card(seats[0], renderer, tmp_path / "01_card.png", header=match.card_header)
         assert out.exists()
         summary_out = render_summary_card(
             seats, renderer, tmp_path / "00_summary.png",
             label="L", title="T", badge="B", stat="S",
+            header=match.card_header, tile_tag_fn=tile_tag_fn,
         )
         assert summary_out.exists()
